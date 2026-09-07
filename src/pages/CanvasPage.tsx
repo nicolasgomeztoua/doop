@@ -13,6 +13,7 @@ import {
 } from '../lib/api'
 import { navigate } from '../App'
 import { Logo } from '../components/Logo'
+import { CanvasLoadingScreen } from '../components/CanvasLoadingScreen'
 import { ensureTab } from '../lib/desktop'
 import { Stage } from '../components/Stage'
 import { FramePresentation } from '../components/FramePresentation'
@@ -77,6 +78,15 @@ const importNoteCls = 'mt-2.5 text-[11.5px] leading-[1.4] text-ink-faint'
 const errorNoteCls = 'mt-2.5 text-[13px] text-accent-ink'
 
 export function CanvasPage({ canvasId }: { canvasId: string }) {
+  const frames = useStore((s) => (s.canvas?.id === canvasId ? s.canvas.frames : null))
+  return (
+    <CanvasLoadingScreen frames={frames}>
+      <CanvasEditor canvasId={canvasId} />
+    </CanvasLoadingScreen>
+  )
+}
+
+function CanvasEditor({ canvasId }: { canvasId: string }) {
   const canvas = useStore((s) => s.canvas)
   const connected = useStore((s) => s.connected)
   const presences = useStore((s) => s.presences)

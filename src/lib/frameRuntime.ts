@@ -17,6 +17,129 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     vSheet.replaceSync('html,body{overscroll-behavior-x:none}')
     document.adoptedStyleSheets = document.adoptedStyleSheets.concat(vSheet)
   } catch (e) {}
+
+  /* Keep loading UI outside the design document so it never appears in
+     exports or serialized edits. Re-scan after morphs and script updates;
+     removed/replaced assets must stop contributing to the pending state. */
+  var assetScan = null
+  var assetProgressKey = null
+  var assetRenderId = null
+  var preloadAssets = false
+  var lazyImages = new Map()
+  var settledResources = new WeakMap()
+  var backgroundImages = new Map()
+  function scheduleAssetScan() {
+    if (assetScan !== null) return
+    // A render-blocking stylesheet can suspend animation frames while it loads.
+    assetScan = setTimeout(scanAssets, 16)
+  }
+  function scanAssets() {
+    assetScan = null
+    if (assetRenderId === null) return
+    var pending = 0
+    var total = 0
+    var usedLazy = new Set()
+    var images = document.images
+    for (var i = 0; i < images.length; i++) {
+      var img = images[i]
+      if (!(img.currentSrc || img.src || img.srcset)) continue
+      if (img.loading === 'lazy' && !img.complete) {
+        if (preloadAssets) {
+          // Preload without changing the design's loading attribute or source.
+          var key = [img.src, img.srcset, img.sizes].join('\\n')
+          usedLazy.add(key)
+          var preload = lazyImages.get(key)
+          if (!preload) {
+            preload = new Image()
+            preload.onload = preload.onerror = scheduleAssetScan
+            preload.sizes = img.sizes
+            preload.srcset = img.srcset
+            preload.src = img.src
+            lazyImages.set(key, preload)
+          }
+          img = preload
+        } else {
+          var rect = img.getBoundingClientRect()
+          if (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth) continue
+        }
+      }
+      total++
+      if (!img.complete) pending++
+    }
+    lazyImages.forEach(function (image, key) {
+      if (!usedLazy.has(key)) {
+        image.onload = image.onerror = null
+        lazyImages.delete(key)
+      }
+    })
+    var resources = document.querySelectorAll('link[rel~="stylesheet"][href], script[src]')
+    for (var j = 0; j < resources.length; j++) {
+      var resource = resources[j]
+      var isStyle = resource instanceof HTMLLinkElement
+      if (isStyle && resource.disabled) continue
+      if (!isStyle && resource.type && ['module', 'text/javascript', 'application/javascript'].indexOf(resource.type.toLowerCase()) === -1) continue
+      total++
+      // A link can retain its previous sheet while a replacement URL loads.
+      if (settledResources.get(resource) !== (isStyle ? resource.href : resource.src)) pending++
+    }
+    // Reading computed styles also starts any fonts needed by the new DOM.
+    var used = new Set()
+    var elements = document.body ? [document.body].concat(Array.from(document.body.querySelectorAll('*'))) : []
+    for (var k = 0; k < elements.length; k++) {
+      var background = getComputedStyle(elements[k]).backgroundImage
+      var urls = background.matchAll(/url\\(["']?(.*?)["']?\\)/g)
+      for (var match of urls) {
+        var url = match[1]
+        if (used.has(url)) continue
+        used.add(url)
+        total++
+        var image = backgroundImages.get(url)
+        if (!image) {
+          image = new Image()
+          image.onload = image.onerror = scheduleAssetScan
+          image.src = url
+          backgroundImages.set(url, image)
+        }
+        if (!image.complete) pending++
+      }
+    }
+    backgroundImages.forEach(function (image, url) {
+      if (!used.has(url)) {
+        image.onload = image.onerror = null
+        backgroundImages.delete(url)
+      }
+    })
+    if (document.fonts) document.fonts.forEach(function (font) {
+      if (font.status === 'unloaded') return
+      total++
+      if (font.status === 'loading') pending++
+    })
+    var progressKey = [assetRenderId, pending, total].join(':')
+    if (progressKey !== assetProgressKey) {
+      assetProgressKey = progressKey
+      parent.postMessage({ type: 'doop:assets-progress', renderId: assetRenderId, pending: pending, total: total }, '*')
+    }
+  }
+  function assetSettled(event) {
+    var target = event.target
+    if (target instanceof HTMLLinkElement) settledResources.set(target, target.href)
+    if (target instanceof HTMLScriptElement) settledResources.set(target, target.src)
+    scheduleAssetScan()
+  }
+  document.addEventListener('load', assetSettled, true)
+  document.addEventListener('error', assetSettled, true)
+  document.addEventListener('scroll', scheduleAssetScan, true)
+  window.addEventListener('resize', scheduleAssetScan)
+  if (document.fonts) {
+    document.fonts.addEventListener('loading', scheduleAssetScan)
+    document.fonts.addEventListener('loadingdone', scheduleAssetScan)
+    document.fonts.addEventListener('loadingerror', scheduleAssetScan)
+  }
+  new MutationObserver(scheduleAssetScan).observe(document.documentElement, {
+    childList: true, subtree: true, characterData: true, attributes: true,
+    attributeFilter: ['src', 'srcset', 'sizes', 'href', 'rel', 'disabled', 'media', 'style', 'class', 'id', 'hidden', 'loading']
+  })
+
   function syncAttrs(from, to) {
     for (var i = from.attributes.length - 1; i >= 0; i--) {
       var name = from.attributes[i].name
@@ -336,7 +459,13 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     if (ev.source !== parent) return
     var d = ev.data
     if (!d) return
-    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) render(d.html)
+    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) {
+      assetRenderId = d.renderId === undefined ? 0 : d.renderId
+      preloadAssets = !!d.preloadAssets
+      assetProgressKey = null
+      render(d.html)
+      scheduleAssetScan()
+    }
     if (d.type === 'doop:edit') setEdit(!!d.on)
     if (d.type === 'doop:probe') {
       parent.postMessage({ type: 'doop:probe-result', reqId: d.reqId, hit: probe(d.x, d.y) }, '*')
