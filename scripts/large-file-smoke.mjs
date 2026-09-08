@@ -3,7 +3,6 @@
 import assert from 'node:assert/strict'
 import puppeteer from 'puppeteer-core'
 import { createServer } from 'vite'
-import { FRAME_BOOTSTRAP } from '../src/lib/frameRuntime.ts'
 
 const server = await createServer({ server: { port: 0, host: '127.0.0.1' } })
 await server.listen()
@@ -124,63 +123,6 @@ try {
   await page.evaluate(() => window.testRoot.unmount())
   console.log('PASS: collapsed frames defer parsing; expansion, canvas-wide search, selection, and Assets still work')
 
-  // A separate document keeps the app's requests and styles out of the measurement.
-  await page.goto('about:blank')
-  const pending = []
-  await page.setRequestInterception(true)
-  page.on('request', (request) => {
-    if (request.url().startsWith('https://large-file.test/')) pending.push(request)
-    else void request.continue()
-  })
-  await page.evaluate((bootstrap) => {
-    window.reports = []
-    window.addEventListener('message', (event) => {
-      if (event.data?.type === 'doop:frame-ready') window.frameReady = true
-      if (event.data?.type === 'doop:assets-progress') window.reports.push(event.data)
-    })
-    const iframe = document.createElement('iframe')
-    iframe.setAttribute('sandbox', 'allow-scripts')
-    iframe.srcdoc = bootstrap.replace(
-      '<script data-v-boot>',
-      `<script data-v-boot>
-      window.styleReads = 0;
-      var originalComputedStyle = window.getComputedStyle;
-      window.getComputedStyle = function () {
-        window.styleReads++;
-        return originalComputedStyle.apply(this, arguments);
-      };
-    `,
-    )
-    document.body.append(iframe)
-  }, FRAME_BOOTSTRAP)
-  await page.waitForFunction(() => window.frameReady)
-  const before = await page.metrics()
-  const started = performance.now()
-  await page.evaluate(() => {
-    const html =
-      '<div>Layer</div>'.repeat(12000) +
-      Array.from({ length: 30 }, (_, i) => `<img src="https://large-file.test/${i}">`).join('')
-    document.querySelector('iframe').contentWindow.postMessage({ type: 'doop:html', html, preloadAssets: true }, '*')
-  })
-  await page.waitForFunction(() => window.reports.at(-1)?.pending === 30)
-  for (let remaining = 30; remaining > 0; remaining--) {
-    assert.ok(pending.length)
-    await pending.shift().respond({
-      status: 200,
-      contentType: 'image/svg+xml',
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"/>',
-    })
-    await page.waitForFunction((remaining) => window.reports.at(-1)?.pending === remaining - 1, {}, remaining)
-  }
-  const after = await page.metrics()
-  const styleReads = await page.frames()[1].evaluate(() => window.styleReads)
-  console.log('Large frame assets:', {
-    durationMs: Math.round(performance.now() - started),
-    taskMs: Math.round((after.TaskDuration - before.TaskDuration) * 1000),
-    styleReads,
-  })
-  assert.ok(styleReads < 25000, 'Image completions must reuse background discovery instead of rescanning every element')
-  assert.equal(await page.evaluate(() => window.reports.at(-1).pending), 0)
   assert.deepEqual(errors, [])
 } catch (error) {
   console.error('Browser errors:', errors)

@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { ElementComment, Frame } from '../../shared/types'
 import { colorFor } from '../../shared/types'
 import { useStore } from '../lib/store'
@@ -7,7 +7,6 @@ import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
-import { CanvasAssetProgress } from './CanvasLoadingScreen'
 import { recordCreate, recordUpdate, recordUpdates, trackSave } from '../lib/history'
 import { snapFrame } from '../lib/snap'
 import { gesture } from '../lib/gesture'
@@ -277,8 +276,6 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   /* The iframe loads a bootstrap once; HTML is posted in and DOM-morphed in
      place, so updates never white-flash the frame with a full reload. */
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
-  const reportAssets = useContext(CanvasAssetProgress)
-  const assetRenderId = useRef(0)
   /* where the last right-click landed, in screen coordinates: Paste drops the
      frame there, and the menu's own box is not that point once Radix has
      flipped or shifted it away from a viewport edge */
@@ -290,24 +287,14 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
       if (ev.data?.type === 'doop:frame-ready') {
         setRuntimeReady(true)
       }
-      if (ev.data?.type === 'doop:assets-progress' && ev.data.renderId === assetRenderId.current) {
-        const { pending, total } = ev.data
-        if (Number.isInteger(pending) && Number.isInteger(total) && pending >= 0 && total >= pending) {
-          reportAssets?.(frame.id, { pending, total })
-        }
-      }
     }
     window.addEventListener('message', onMsg)
     return () => window.removeEventListener('message', onMsg)
-  }, [frame.id, reportAssets])
+  }, [])
   useEffect(() => {
     if (!runtimeReady || editing || suspendPost) return
-    reportAssets?.(frame.id, null)
-    iframeRef.current?.contentWindow?.postMessage(
-      { type: 'doop:html', html, renderId: ++assetRenderId.current, preloadAssets: !!reportAssets },
-      '*',
-    )
-  }, [runtimeReady, html, editing, suspendPost, frame.id, reportAssets])
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:html', html }, '*')
+  }, [runtimeReady, html, editing, suspendPost])
 
   /* The parent owns source edits. This bridge only reads the sandbox; both
      the window and request identity must match before accepting a reply. */
