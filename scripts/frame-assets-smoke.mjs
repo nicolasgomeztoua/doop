@@ -19,13 +19,18 @@ page.on('request', (request) => {
   else void request.continue()
 })
 
+let renderId = 0
 async function render(html, preloadAssets = false) {
+  renderId++
   await page.evaluate(
-    ({ html, preloadAssets }) => {
-      document.querySelector('iframe').contentWindow.postMessage({ type: 'doop:html', html, preloadAssets }, '*')
+    ({ html, preloadAssets, renderId }) => {
+      document
+        .querySelector('iframe')
+        .contentWindow.postMessage({ type: 'doop:html', html, preloadAssets, renderId }, '*')
     },
-    { html, preloadAssets },
+    { html, preloadAssets, renderId },
   )
+  await page.waitForFunction((id) => window.assetProgress?.renderId === id, {}, renderId)
 }
 async function loading(value) {
   await page.waitForFunction((value) => window.assetLoading === value, { timeout: 5000 }, value)
@@ -37,6 +42,7 @@ async function settle(
   body = '<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"/>',
 ) {
   const url = `https://assets.test/${name}`
+  if (!requests.has(url)) await page.waitForRequest(url, { timeout: 5000 })
   assert.ok(requests.has(url), `Expected a request for ${name}`)
   await requests
     .get(url)
@@ -89,6 +95,36 @@ try {
   await settle('background')
   await loading(false)
   console.log('PASS: CSS background images are tracked')
+
+  await render('<style>.paint{background-image:url(https://assets.test/class-background)}</style><div>Paint</div>')
+  await loading(false)
+  await page.frames()[1].evaluate(() => document.body.classList.add('paint'))
+  await loading(true)
+  await page.frames()[1].evaluate(() => document.body.classList.remove('paint'))
+  await loading(false)
+  await settle('class-background')
+  console.log('PASS: background discovery refreshes after class changes and ignores removed assets')
+
+  await render('<link rel="stylesheet" href="https://assets.test/late-style"><p>Late background</p>')
+  await loading(true)
+  await settle('late-style', false, 'text/css', 'body{background-image:url(https://assets.test/late-background)}')
+  await page.waitForFunction(() => window.assetProgress.total === 2)
+  await loading(true)
+  await settle('late-background')
+  await loading(false)
+  console.log('PASS: backgrounds discovered by a loaded stylesheet remain pending')
+
+  await render(`<style>
+    .row{display:flex;width:200px}.container{container-type:inline-size;flex:1}
+    .paint{height:50px}@container(max-width:175px){.paint{background-image:url(https://assets.test/container-background)}}
+    </style><div class="row"><img src="https://assets.test/container-image"><div class="container"><div class="paint"></div></div></div>`)
+  await loading(true)
+  await settle('container-image')
+  await page.waitForFunction(() => window.assetProgress.total === 2)
+  await loading(true)
+  await settle('container-background')
+  await loading(false)
+  console.log('PASS: intrinsic image sizes refresh backgrounds selected by container queries')
 
   await render('<link rel="stylesheet" href="https://assets.test/style"><p>Styled text</p>')
   await loading(true)

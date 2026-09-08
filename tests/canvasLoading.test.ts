@@ -16,11 +16,12 @@ describe('canvas loading progress', () => {
     })
   })
 
-  it('advances with completed assets and waits for the last outstanding resource', () => {
+  it('reveals at 20% of assets without counting frame startup toward the threshold', () => {
     const frames = [{ id: 'a' }]
-    expect(canvasLoadProgress(frames, { a: { total: 8, pending: 3 } })).toEqual({ value: 70, ready: false })
-    expect(canvasLoadProgress(frames, { a: { total: 8, pending: 1 } })).toEqual({ value: 90, ready: false })
-    expect(canvasLoadProgress(frames, { a: { total: 8, pending: 0 } })).toEqual({ value: 100, ready: true })
+    expect(canvasLoadProgress(frames, { a: { total: 10, pending: 10 } })).toEqual({ value: 0, ready: false })
+    expect(canvasLoadProgress(frames, { a: { total: 10, pending: 9 } })).toEqual({ value: 10, ready: false })
+    expect(canvasLoadProgress(frames, { a: { total: 10, pending: 8 } })).toEqual({ value: 20, ready: true })
+    expect(canvasLoadProgress(frames, { a: { total: 10, pending: 0 } })).toEqual({ value: 100, ready: true })
   })
 
   it('invalidates replaced HTML and ignores removed frames', () => {

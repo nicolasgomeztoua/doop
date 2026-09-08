@@ -21,15 +21,27 @@ export function parseDesign(html: string): Document {
   return new DOMParser().parseFromString(html, 'text/html')
 }
 
-export function designSelector(el: Element): string {
+function anchoredSelector(el: Element, unique: (attribute: string, value: string) => boolean): string | null {
   const id = el.getAttribute(NODE_ID)
-  if (id && el.ownerDocument.querySelectorAll(`[${NODE_ID}="${CSS.escape(id)}"]`).length === 1) {
+  if (id && unique(NODE_ID, id)) {
     return `[${NODE_ID}="${CSS.escape(id)}"]`
   }
-  if (el.id && el.ownerDocument.querySelectorAll(`#${CSS.escape(el.id)}`).length === 1) {
+  if (el.id && unique('id', el.id)) {
     return `#${CSS.escape(el.id)}`
   }
   if (el === el.ownerDocument.body) return 'body'
+  return null
+}
+
+export function designSelector(el: Element): string {
+  const anchor = anchoredSelector(
+    el,
+    (attribute, value) =>
+      el.ownerDocument.querySelectorAll(
+        attribute === 'id' ? `#${CSS.escape(value)}` : `[${attribute}="${CSS.escape(value)}"]`,
+      ).length === 1,
+  )
+  if (anchor) return anchor
   const parts: string[] = []
   let current: Element | null = el
   while (current && current !== el.ownerDocument.documentElement) {
@@ -69,17 +81,58 @@ export function layerName(el: Element): string {
 export function readLayers(doc: Document): { layers: DesignLayer[]; truncated: boolean } {
   let count = 0
   let truncated = false
-  function visit(el: Element, depth: number, parent: string | null, inheritedLock: boolean): DesignLayer | null {
+  // Index uniqueness once, including nodes beyond the visible layer limit.
+  // A document-wide selector query for every layer becomes quadratic.
+  const identities = new Map<string, Map<string, number>>([
+    [NODE_ID, new Map()],
+    ['id', new Map()],
+  ])
+  const identityKey = (attribute: string, value: string) =>
+    attribute === 'id' && doc.compatMode === 'BackCompat'
+      ? value.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      : value
+  for (const el of doc.querySelectorAll(`[${NODE_ID}], [id]`)) {
+    for (const [attribute, counts] of identities) {
+      const value = el.getAttribute(attribute)
+      if (value) {
+        const key = identityKey(attribute, value)
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+    }
+  }
+  function visit(
+    el: Element,
+    depth: number,
+    parent: string | null,
+    inheritedLock: boolean,
+    path: string,
+  ): DesignLayer | null {
     if (OMIT.has(el.tagName.toUpperCase())) return null
     if (count >= 3000 || depth > 80) {
       truncated = true
       return null
     }
     count++
-    const selector = designSelector(el)
+    const selector =
+      anchoredSelector(el, (attribute, value) => identities.get(attribute)?.get(identityKey(attribute, value)) === 1) ??
+      path
     const ownLocked = el.hasAttribute('data-doop-locked')
     const locked = inheritedLock || ownLocked
     const style = (el as HTMLElement).style
+    const children: DesignLayer[] = []
+    const positions = new Map<string, number>()
+    for (const child of el.children) {
+      const nth = (positions.get(child.tagName) ?? 0) + 1
+      positions.set(child.tagName, nth)
+      const layer = visit(
+        child,
+        depth + 1,
+        selector,
+        locked,
+        `${path} > ${child.tagName.toLowerCase()}:nth-of-type(${nth})`,
+      )
+      if (layer) children.push(layer)
+    }
     return {
       selector,
       parent,
@@ -91,13 +144,10 @@ export function readLayers(doc: Document): { layers: DesignLayer[]; truncated: b
       ownLocked,
       text: el.children.length === 0 ? el.textContent || '' : '',
       image: el.tagName === 'IMG' ? el.getAttribute('src') || undefined : undefined,
-      children: [...el.children].flatMap((child) => {
-        const layer = visit(child, depth + 1, selector, locked)
-        return layer ? [layer] : []
-      }),
+      children,
     }
   }
-  const root = visit(doc.body, 0, null, false)
+  const root = visit(doc.body, 0, null, false, 'body:nth-of-type(1)')
   return { layers: root ? [root] : [], truncated }
 }
 

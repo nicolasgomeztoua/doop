@@ -33,11 +33,19 @@ export function LayersPanel({
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [imageUrl, setImageUrl] = useState('')
-  const trees = useMemo<FrameTree[]>(
-    () => (frames ?? []).map((frame) => ({ frame, ...readLayers(parseDesign(frame.html)) })),
-    [frames],
-  )
   const needle = search.toLowerCase().trim()
+  // Collapsed frames need only their names. Read their HTML when a tree is
+  // expanded, a selected element needs revealing, or a canvas-wide search runs.
+  const trees = useMemo<FrameTree[]>(
+    () =>
+      (frames ?? []).map((frame) => ({
+        frame,
+        ...(tab === 'assets' || needle || open.has(`frame:${frame.id}`) || selection?.frameId === frame.id
+          ? readLayers(parseDesign(frame.html))
+          : { layers: [], truncated: false }),
+      })),
+    [frames, tab, needle, open, selection?.frameId],
+  )
 
   // Reveal all ancestors when selection originates from the canvas or inspector.
   useEffect(() => {
@@ -52,7 +60,9 @@ export function LayersPanel({
       ancestors.push(`${tree.frame.id}:${selected.parent}`)
       selected = layers.find((layer) => layer.selector === selected?.parent)
     }
-    setOpen((previous) => new Set([...previous, ...ancestors]))
+    setOpen((previous) =>
+      ancestors.every((ancestor) => previous.has(ancestor)) ? previous : new Set([...previous, ...ancestors]),
+    )
   }, [selection, trees])
 
   function toggle(key: string) {

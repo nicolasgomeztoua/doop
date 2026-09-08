@@ -28,10 +28,56 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   var lazyImages = new Map()
   var settledResources = new WeakMap()
   var backgroundImages = new Map()
+  var backgroundsDirty = true
+  var backgroundWalker = null
+  var backgroundNode = null
+  var backgroundUrls = new Set()
+  var hasQueryContainers = false
   function scheduleAssetScan() {
     if (assetScan !== null) return
     // A render-blocking stylesheet can suspend animation frames while it loads.
     assetScan = setTimeout(scanAssets, 16)
+  }
+  function invalidateBackgrounds() {
+    backgroundsDirty = true
+    scheduleAssetScan()
+  }
+  function discoverBackgrounds() {
+    if (backgroundsDirty) {
+      backgroundsDirty = false
+      backgroundUrls = new Set()
+      hasQueryContainers = false
+      backgroundWalker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT)
+      backgroundNode = document.documentElement
+    }
+    // Yield between chunks so a large document cannot monopolize the canvas.
+    // Asset completions reuse this discovery instead of reading every style again.
+    var deadline = performance.now() + 5
+    while (backgroundNode) {
+      var computed = getComputedStyle(backgroundNode)
+      if (computed.containerType && computed.containerType !== 'normal') hasQueryContainers = true
+      var background = computed.backgroundImage
+      for (var match of background.matchAll(/url\\(["']?(.*?)["']?\\)/g)) {
+        var url = match[1]
+        backgroundUrls.add(url)
+        if (!backgroundImages.has(url)) {
+          var image = new Image()
+          image.onload = image.onerror = scheduleAssetScan
+          image.src = url
+          backgroundImages.set(url, image)
+        }
+      }
+      backgroundNode = backgroundWalker.nextNode()
+      if (backgroundNode && performance.now() >= deadline) return false
+    }
+    backgroundImages.forEach(function (image, url) {
+      if (!backgroundUrls.has(url)) {
+        image.onload = image.onerror = null
+        backgroundImages.delete(url)
+      }
+    })
+    backgroundWalker = null
+    return true
   }
   function scanAssets() {
     assetScan = null
@@ -82,32 +128,16 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       // A link can retain its previous sheet while a replacement URL loads.
       if (settledResources.get(resource) !== (isStyle ? resource.href : resource.src)) pending++
     }
-    // Reading computed styles also starts any fonts needed by the new DOM.
-    var used = new Set()
-    var elements = document.body ? [document.body].concat(Array.from(document.body.querySelectorAll('*'))) : []
-    for (var k = 0; k < elements.length; k++) {
-      var background = getComputedStyle(elements[k]).backgroundImage
-      var urls = background.matchAll(/url\\(["']?(.*?)["']?\\)/g)
-      for (var match of urls) {
-        var url = match[1]
-        if (used.has(url)) continue
-        used.add(url)
-        total++
-        var image = backgroundImages.get(url)
-        if (!image) {
-          image = new Image()
-          image.onload = image.onerror = scheduleAssetScan
-          image.src = url
-          backgroundImages.set(url, image)
-        }
-        if (!image.complete) pending++
-      }
+    // Reading computed styles also starts fonts. Discovery itself stays pending
+    // until every chunk has run, including when there are no image URLs yet.
+    if (!discoverBackgrounds()) {
+      total++
+      pending++
+      assetScan = setTimeout(scanAssets, 0)
     }
-    backgroundImages.forEach(function (image, url) {
-      if (!used.has(url)) {
-        image.onload = image.onerror = null
-        backgroundImages.delete(url)
-      }
+    backgroundImages.forEach(function (image) {
+      total++
+      if (!image.complete) pending++
     })
     if (document.fonts) document.fonts.forEach(function (font) {
       if (font.status === 'unloaded') return
@@ -122,20 +152,32 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   }
   function assetSettled(event) {
     var target = event.target
-    if (target instanceof HTMLLinkElement) settledResources.set(target, target.href)
-    if (target instanceof HTMLScriptElement) settledResources.set(target, target.src)
+    if (target instanceof HTMLLinkElement) {
+      settledResources.set(target, target.href)
+      backgroundsDirty = true
+    }
+    if (target instanceof HTMLScriptElement) {
+      settledResources.set(target, target.src)
+      backgroundsDirty = true
+    }
+    // Intrinsic image/font sizes can change backgrounds selected by @container.
+    if (hasQueryContainers && target instanceof HTMLImageElement) backgroundsDirty = true
+    scheduleAssetScan()
+  }
+  function fontsSettled() {
+    if (hasQueryContainers) backgroundsDirty = true
     scheduleAssetScan()
   }
   document.addEventListener('load', assetSettled, true)
   document.addEventListener('error', assetSettled, true)
   document.addEventListener('scroll', scheduleAssetScan, true)
-  window.addEventListener('resize', scheduleAssetScan)
+  window.addEventListener('resize', invalidateBackgrounds)
   if (document.fonts) {
     document.fonts.addEventListener('loading', scheduleAssetScan)
-    document.fonts.addEventListener('loadingdone', scheduleAssetScan)
-    document.fonts.addEventListener('loadingerror', scheduleAssetScan)
+    document.fonts.addEventListener('loadingdone', fontsSettled)
+    document.fonts.addEventListener('loadingerror', fontsSettled)
   }
-  new MutationObserver(scheduleAssetScan).observe(document.documentElement, {
+  new MutationObserver(invalidateBackgrounds).observe(document.documentElement, {
     childList: true, subtree: true, characterData: true, attributes: true,
     attributeFilter: ['src', 'srcset', 'sizes', 'href', 'rel', 'disabled', 'media', 'style', 'class', 'id', 'hidden', 'loading']
   })

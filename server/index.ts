@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import express from 'express'
+import compression from 'compression'
 import { eq, inArray } from 'drizzle-orm'
 import { toNodeHandler, fromNodeHeaders } from 'better-auth/node'
 import { oAuthDiscoveryMetadata } from 'better-auth/plugins'
@@ -1525,6 +1526,8 @@ app.get('/sitemap.xml', (_req, res) => {
 /* production: serve the built client */
 if (process.env.NODE_ENV === 'production') {
   const dist = path.join(process.cwd(), 'dist')
+  // Compress the app shell and bundles without buffering API/MCP streams.
+  app.use(compression())
   app.use(express.static(dist))
   app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')))
 }
@@ -1532,7 +1535,18 @@ if (process.env.NODE_ENV === 'production') {
 /* ------------------------------------------------- websocket */
 
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server, path: '/ws' })
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  perMessageDeflate: {
+    // Large canvas snapshots benefit; cursor/presence messages stay cheap.
+    threshold: 1024,
+    serverNoContextTakeover: true,
+    clientNoContextTakeover: true,
+    concurrencyLimit: 4,
+    zlibDeflateOptions: { level: 3 },
+  },
+})
 
 wss.on('connection', (ws, upgradeReq) => {
   /* the session cookie rides the upgrade request; resolve it once */

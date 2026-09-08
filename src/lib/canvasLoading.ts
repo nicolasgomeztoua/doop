@@ -1,24 +1,23 @@
 export type AssetProgress = { pending: number; total: number }
 
-/** Include one unit per frame so an iframe that has not rendered cannot
- * accidentally count as complete, even when its HTML contains no assets. */
+/** Wait for each frame's first report, then reveal once 20% of assets have
+ * settled. Frame startup itself must not count as a completed asset. */
 export function canvasLoadProgress(
   frames: readonly { id: string }[] | null,
   reports: Readonly<Record<string, AssetProgress | null>>,
 ) {
   if (!frames) return { value: 0, ready: false }
-  let total = 1 + frames.length // canvas data plus each rendered frame
-  let completed = 1
-  let ready = true
+  let total = 0
+  let completed = 0
+  let rendered = 0
   for (const frame of frames) {
     const report = reports[frame.id]
-    if (!report) {
-      ready = false
-      continue
-    }
+    if (!report) continue
+    rendered++
     total += report.total
-    completed += 1 + report.total - report.pending
-    if (report.pending) ready = false
+    completed += report.total - report.pending
   }
-  return { value: (completed / total) * 100, ready }
+  const allReported = rendered === frames.length
+  const value = total ? (completed / total) * 100 : allReported ? 100 : 0
+  return { value, ready: allReported && value >= 20 }
 }

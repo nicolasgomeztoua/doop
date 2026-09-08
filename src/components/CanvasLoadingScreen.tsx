@@ -28,9 +28,8 @@ export function CanvasLoadingScreen({
     })
   }, [])
   const { value, ready } = canvasLoadProgress(frames, reports)
-  // New styles can discover more assets. Keep the bar moving forward, but
-  // reserve completion until the whole canvas has stayed settled briefly.
-  const nextProgress = Math.max(progress, Math.min(95, value))
+  // New styles can discover more assets. Keep the bar moving forward.
+  const nextProgress = Math.max(progress, value)
   if (nextProgress !== progress) setProgress(nextProgress)
 
   useLayoutEffect(() => {
@@ -50,21 +49,10 @@ export function CanvasLoadingScreen({
   }, [revealed])
 
   useEffect(() => {
-    if (revealed) return
-    if (!ready) return
-    let revealTimer: ReturnType<typeof setTimeout>
-    const settleTimer = setTimeout(() => {
-      setProgress(100)
-      revealTimer = setTimeout(() => {
-        finished.current = true
-        setRevealed(true)
-      }, 300)
-    }, 250)
-    return () => {
-      clearTimeout(settleTimer)
-      clearTimeout(revealTimer)
-    }
-  }, [ready, value, revealed, reports])
+    if (revealed || !ready) return
+    finished.current = true
+    setRevealed(true)
+  }, [ready, revealed])
 
   return (
     <CanvasAssetProgress.Provider value={report}>
@@ -77,7 +65,7 @@ export function CanvasLoadingScreen({
           <div className="flex -translate-y-4 flex-col items-center gap-8">
             <Logo className="size-16" />
             <Progress
-              value={ready ? progress : Math.min(95, progress)}
+              value={progress}
               aria-label="Loading canvas"
               className="h-[3px] w-40 bg-line-soft [&_[data-slot=progress-indicator]]:bg-ink motion-reduce:[&_[data-slot=progress-indicator]]:transition-none"
             />
