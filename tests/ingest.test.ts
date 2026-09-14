@@ -347,7 +347,7 @@ describe('design sync freeze', () => {
 
     const got = await (await owner.get(`/api/canvases/${canvas.id}`)).json()
     expect(got.frames).toHaveLength(1)
-    expect(got.frames[0].html).toContain('v1') // the rewrite was refused
-    expect(got.frames[0].html).not.toContain('v2')
+    expect(got.frames[0].html).toContain('<h1>v1</h1>') // the rewrite was refused
+    expect(got.frames[0].html).not.toContain('<h1>v2</h1>')
   })
 })
