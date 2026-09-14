@@ -3,7 +3,7 @@ import type { Frame } from '../../shared/types'
 import { api, ApiError } from './api'
 import { useStore } from './store'
 import { recordUpdate, trackSave } from './history'
-import { designSelector, editDesign, parseDesign, sourceElement, type DesignEdit } from './designDocument'
+import { editDesign, parseDesign, sourceElement, type DesignEdit } from './designDocument'
 
 export interface ElementSelection {
   frameId: string
@@ -11,94 +11,60 @@ export interface ElementSelection {
   identity: string
   fallback?: { selector: string; identity: string }
 }
-export interface ElementInspection {
-  /** Source and viewport that produced these measured bounds. */
-  rendered?: { html: string; width: number; height: number }
-  selector: string
-  styles: Record<string, string>
-  rect: { x: number; y: number; width: number; height: number }
-}
-
 interface EditorState {
+  /** Identity of the shared selection, used to reject stale positional selectors. */
   selection: ElementSelection | null
-  inspection: ElementInspection | null
-  layersOpen: boolean
   busy: boolean
   error: string | null
   saved: boolean
   inlineFrameId: string | null
   unsavedHtml: Record<string, string>
-  setLayersOpen(open: boolean): void
 }
 
-function preference(key: string, fallback: boolean): boolean {
-  try {
-    return localStorage.getItem(key) === null ? fallback : localStorage.getItem(key) === '1'
-  } catch {
-    return fallback
-  }
-}
-
-export const useDesignEditor = create<EditorState>((set) => ({
+export const useDesignEditor = create<EditorState>(() => ({
   selection: null,
-  inspection: null,
-  layersOpen: preference('doop:layers-open', true),
   busy: false,
   error: null,
   saved: false,
   inlineFrameId: null,
   unsavedHtml: {},
-  setLayersOpen: (layersOpen) => {
-    set({ layersOpen })
-    try {
-      localStorage.setItem('doop:layers-open', layersOpen ? '1' : '0')
-    } catch {
-      /* private storage */
-    }
-  },
 }))
 
-export function selectDesignElement(frameId: string, selector: string) {
-  const frame = useStore.getState().canvas?.frames.find((f) => f.id === frameId)
-  const el = frame ? sourceElement(parseDesign(frame.html), selector) : null
-  useStore.getState().select(frameId)
-  useStore.getState().setInspectorOpen(true)
-  useDesignEditor.setState({
-    selection: el ? { frameId, selector: designSelector(el), identity: el.outerHTML } : null,
-    inspection: null,
-    error: el ? null : 'This element is generated at runtime. Choose a source layer in Layers.',
-  })
-}
-
-export function selectDesignFrame(frameId: string) {
-  useDesignEditor.setState({ selection: null, inspection: null, error: null })
-  useStore.getState().select(frameId)
-  useStore.getState().setInspectorOpen(true)
-}
-
 useStore.subscribe((state, before) => {
-  if (state.canvas?.id !== before.canvas?.id || state.selectedId !== before.selectedId) {
-    useDesignEditor.setState({ selection: null, inspection: null, error: null, saved: false })
+  const pick = state.selectedElement
+  if (state.canvas?.id !== before.canvas?.id)
+    useDesignEditor.setState({ selection: null, inlineFrameId: null, error: null, saved: false })
+  if (state.canvas?.id !== before.canvas?.id || pick !== before.selectedElement) {
+    const own = useDesignEditor.getState().selection
+    const frame = pick && state.canvas?.frames.find((f) => f.id === pick.frameId)
+    const el = frame && typeof DOMParser !== 'undefined' ? sourceElement(parseDesign(frame.html), pick!.selector) : null
+    useDesignEditor.setState({
+      selection:
+        el && pick
+          ? {
+              ...pick,
+              identity: el.outerHTML,
+              ...(pick.frameId === own?.frameId && pick.selector === own.selector && el.outerHTML === own.identity
+                ? { fallback: own.fallback }
+                : {}),
+            }
+          : null,
+      error: null,
+      saved: false,
+    })
   } else {
     const selection = useDesignEditor.getState().selection
-    const frame = selection?.fallback && state.canvas?.frames.find((item) => item.id === selection.frameId)
-    const previous = selection && before.canvas?.frames.find((item) => item.id === selection.frameId)
-    if (frame && frame.html !== previous?.html && selection?.fallback) {
-      const doc = parseDesign(frame.html)
-      const current = sourceElement(doc, selection.selector)
-      if (!current || (!anchored(selection.selector) && current.outerHTML !== selection.identity)) {
-        const fallback = sourceElement(doc, selection.fallback.selector)
-        if (fallback && (anchored(selection.fallback.selector) || fallback.outerHTML === selection.fallback.identity)) {
-          useDesignEditor.setState({
-            selection: {
-              frameId: frame.id,
-              selector: selection.fallback.selector,
-              identity: fallback.outerHTML,
-              fallback: { selector: selection.selector, identity: selection.identity },
-            },
-            inspection: null,
-          })
+    const frame = selection && state.canvas?.frames.find((f) => f.id === selection.frameId)
+    if (frame && selection?.fallback && !sourceElement(parseDesign(frame.html), selection.selector)) {
+      const el = sourceElement(parseDesign(frame.html), selection.fallback.selector)
+      if (el && el.outerHTML === selection.fallback.identity) {
+        const next = {
+          frameId: frame.id,
+          ...selection.fallback,
+          fallback: { selector: selection.selector, identity: selection.identity },
         }
+        useDesignEditor.setState({ selection: next })
+        state.setSelectedElement({ frameId: frame.id, selector: next.selector })
       }
     }
   }
@@ -150,12 +116,15 @@ export function commitDesignEdit(frameId: string, selector: string, edit: Design
       })
     }
     let accepted = false
-    return saveDesignPatch(frameId, { html: result.html }, () => {
+    const pending = saveDesignPatch(frameId, { html: result.html }, () => {
       accepted = true
-    }).then(() => {
+    })
+    if (follows) useStore.getState().setSelectedElement({ frameId, selector: result.selector })
+    return pending.then(() => {
       const current = useDesignEditor.getState().selection
       if (!accepted && follows && current?.frameId === frameId && current.selector === result.selector) {
-        useDesignEditor.setState({ selection: selected, inspection: null })
+        useDesignEditor.setState({ selection: selected })
+        useStore.getState().setSelectedElement(selected ? { frameId, selector: selected.selector } : null)
       }
     })
   } catch (err) {
@@ -296,4 +265,9 @@ export function saveDesignPatch(frameId: string, patch: Partial<Frame>, onSucces
   saveQueue = pending
   trackSave(pending)
   return pending
+}
+
+/** Exports wait for every edit queued before the request. */
+export function waitForDesignSaves() {
+  return saveQueue
 }

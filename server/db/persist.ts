@@ -6,6 +6,7 @@ import { db } from './index.ts'
 import * as t from './schema.ts'
 import { extractAssetIds } from '../assets.ts'
 import { roleByAgentName } from '../../shared/agents.ts'
+import { isCommunityCategory } from '../../shared/types.ts'
 import type {
   ActivityItem,
   AgentTask,
@@ -31,22 +32,26 @@ function swallow(p: Promise<unknown>) {
   p.catch((err) => console.error('[db] write failed', err))
 }
 
+/** every mutable canvas column, so insert and upsert can't drift apart */
+function canvasColumns(c: Canvas) {
+  return {
+    name: c.name,
+    ownerId: c.ownerId ?? null,
+    linkAccess: c.linkAccess ?? null,
+    publishedAt: c.publishedAt ?? null,
+    description: c.description ?? null,
+    category: c.category ?? null,
+    copyCount: c.copyCount ?? 0,
+    updatedAt: c.updatedAt,
+  }
+}
+
 export function saveCanvas(c: Canvas) {
   swallow(
     db
       .insert(t.canvases)
-      .values({
-        id: c.id,
-        name: c.name,
-        ownerId: c.ownerId ?? null,
-        linkAccess: c.linkAccess ?? null,
-        createdAt: c.createdAt,
-        updatedAt: c.updatedAt,
-      })
-      .onConflictDoUpdate({
-        target: t.canvases.id,
-        set: { name: c.name, ownerId: c.ownerId ?? null, linkAccess: c.linkAccess ?? null, updatedAt: c.updatedAt },
-      }),
+      .values({ id: c.id, ...canvasColumns(c), createdAt: c.createdAt })
+      .onConflictDoUpdate({ target: t.canvases.id, set: canvasColumns(c) }),
   )
 }
 
@@ -54,14 +59,7 @@ export function saveCanvas(c: Canvas) {
  * duplication must not report success until every copied row is durable. */
 export async function saveCanvasCopy(c: Canvas): Promise<void> {
   await db.transaction(async (tx) => {
-    await tx.insert(t.canvases).values({
-      id: c.id,
-      name: c.name,
-      ownerId: c.ownerId ?? null,
-      linkAccess: c.linkAccess ?? null,
-      createdAt: c.createdAt,
-      updatedAt: c.updatedAt,
-    })
+    await tx.insert(t.canvases).values({ id: c.id, ...canvasColumns(c), createdAt: c.createdAt })
 
     if (c.frames.length) {
       await tx.insert(t.frames).values(
@@ -563,6 +561,10 @@ export async function hydrate(): Promise<Hydrated> {
     name: c.name,
     ownerId: c.ownerId ?? undefined,
     linkAccess: c.linkAccess === 'edit' ? 'edit' : undefined,
+    ...(c.publishedAt != null ? { publishedAt: c.publishedAt } : {}),
+    ...(c.description ? { description: c.description } : {}),
+    ...(isCommunityCategory(c.category) ? { category: c.category } : {}),
+    ...(c.copyCount ? { copyCount: c.copyCount } : {}),
     createdAt: c.createdAt,
     updatedAt: c.updatedAt,
     frames: [],

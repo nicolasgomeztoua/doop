@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore } from '../lib/store'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
@@ -14,7 +14,6 @@ import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { MenuHint } from './ui/menu'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
 import { Toolbar, ToolbarButton, ToolbarDivider, ToolbarValue } from './ui/toolbar'
-import { useDesignEditor } from '../lib/designEditor'
 
 const MIN_ZOOM = 0.08
 const MAX_ZOOM = 3
@@ -38,34 +37,6 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   /* iframe oversampling factor — bumped only once the zoom settles */
   const [raster, setRaster] = useState(1)
   const fitted = useRef(false)
-
-  // Opening a rail changes the usable canvas. Keep its visual center and
-  // scale down on shrink so the focused design stays clear of the panels.
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    let width = el.clientWidth
-    let height = el.clientHeight
-    const observer = new ResizeObserver(() => {
-      const nextWidth = el.clientWidth
-      const nextHeight = el.clientHeight
-      if (width && height && nextWidth && nextHeight && (width !== nextWidth || height !== nextHeight)) {
-        const vp = useStore.getState().viewport
-        const scale = Math.min(1, nextWidth / width, nextHeight / height)
-        const zoom = Math.max(MIN_ZOOM, vp.zoom * scale)
-        const ratio = zoom / vp.zoom
-        setViewport({
-          x: nextWidth / 2 - (width / 2 - vp.x) * ratio,
-          y: nextHeight / 2 - (height / 2 - vp.y) * ratio,
-          zoom,
-        })
-      }
-      width = nextWidth
-      height = nextHeight
-    })
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [setViewport])
 
   /* Viewport → DOM without React: no component subscribes to the viewport, so
      pan/zoom never renders anything. A store subscription writes the world
@@ -103,16 +74,6 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     }
   }, [])
 
-  /* zoom-to-fit once the canvas arrives — unless the URL deep-links a frame */
-  useEffect(() => {
-    if (!canvas || fitted.current) return
-    fitted.current = true
-    const focusId = new URLSearchParams(location.search).get('frame')
-    const target = focusId ? canvas.frames.find((f) => f.id === focusId) : null
-    if (target) focusFrame(target)
-    else fit()
-  }, [canvas])
-
   /* a fly-to request (prompt bar): glide the camera to the frame instead of
      snapping, so the new design streams in on-screen with a bit of drama.
      The request object stays in the store; only a NEW request re-runs this. */
@@ -137,9 +98,6 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     const DURATION = 700
     const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
     let raf = requestAnimationFrame(function step(now: number) {
-      /* Presentation cancels this camera request, rather than pausing it:
-         closing must retain the exact viewport at entry, with no delayed
-         glide or snap. A new request after closing can navigate normally. */
       if (useStore.getState().presentedFrameId) return
       const k = ease(Math.min(1, (now - start) / DURATION))
       setViewport({
@@ -153,25 +111,28 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   }, [flyTo]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* center one frame in the viewport and select it (shared frame links) */
-  function focusFrame(f: { id: string; x: number; y: number; width: number; height: number }) {
-    const el = ref.current
-    if (!el) return
-    const pad = 80
-    const zoom = Math.min(
-      MAX_ZOOM,
-      Math.max(MIN_ZOOM, Math.min((el.clientWidth - pad * 2) / f.width, (el.clientHeight - pad * 2) / f.height, 1)),
-    )
-    setViewport({
-      x: (el.clientWidth - f.width * zoom) / 2 - f.x * zoom,
-      y: (el.clientHeight - f.height * zoom) / 2 - f.y * zoom,
-      zoom,
-    })
-    select(f.id)
-    /* a shared frame link asks for this exact frame — show its details too */
-    useStore.getState().setInspectorOpen(true)
-  }
+  const focusFrame = useCallback(
+    (f: { id: string; x: number; y: number; width: number; height: number }) => {
+      const el = ref.current
+      if (!el) return
+      const pad = 80
+      const zoom = Math.min(
+        MAX_ZOOM,
+        Math.max(MIN_ZOOM, Math.min((el.clientWidth - pad * 2) / f.width, (el.clientHeight - pad * 2) / f.height, 1)),
+      )
+      setViewport({
+        x: (el.clientWidth - f.width * zoom) / 2 - f.x * zoom,
+        y: (el.clientHeight - f.height * zoom) / 2 - f.y * zoom,
+        zoom,
+      })
+      select(f.id)
+      /* a shared frame link asks for this exact frame — show its details too */
+      useStore.getState().setInspectorOpen(true)
+    },
+    [setViewport, select],
+  )
 
-  function fit() {
+  const fit = useCallback(() => {
     const el = ref.current
     const c = useStore.getState().canvas
     if (!el || !c) return
@@ -196,33 +157,17 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       y: (h - (maxY - minY) * zoom) / 2 - minY * zoom,
       zoom,
     })
-  }
+  }, [setViewport])
 
-  function fitSelection() {
-    const el = ref.current
-    const state = useStore.getState()
-    const frames = state.canvas?.frames.filter((frame) => state.selectedIds.includes(frame.id)) ?? []
-    if (!el || !frames.length) return
-    const editor = useDesignEditor.getState()
-    const rect = editor.inspection?.selector === editor.selection?.selector ? editor.inspection?.rect : null
-    const boxes =
-      rect && frames.length === 1
-        ? [{ x: frames[0].x + rect.x, y: frames[0].y + rect.y, width: rect.width, height: rect.height }]
-        : frames
-    const x = Math.min(...boxes.map((box) => box.x))
-    const y = Math.min(...boxes.map((box) => box.y))
-    const width = Math.max(...boxes.map((box) => box.x + box.width)) - x
-    const height = Math.max(...boxes.map((box) => box.y + box.height)) - y
-    const zoom = Math.max(
-      MIN_ZOOM,
-      Math.min(MAX_ZOOM, (el.clientWidth - 100) / Math.max(1, width), (el.clientHeight - 160) / Math.max(1, height)),
-    )
-    setViewport({
-      x: (el.clientWidth - width * zoom) / 2 - x * zoom,
-      y: (el.clientHeight - height * zoom) / 2 - y * zoom,
-      zoom,
-    })
-  }
+  /* zoom-to-fit once the canvas arrives — unless the URL deep-links a frame */
+  useEffect(() => {
+    if (!canvas || fitted.current) return
+    fitted.current = true
+    const focusId = new URLSearchParams(location.search).get('frame')
+    const target = focusId ? canvas.frames.find((f) => f.id === focusId) : null
+    if (target) focusFrame(target)
+    else fit()
+  }, [canvas, fit, focusFrame])
 
   /* wheel: pan / pinch-zoom — needs a non-passive listener. Trackpads fire
      wheel events faster than the display refreshes, so deltas accumulate and
@@ -261,6 +206,8 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     }
 
     function onWheel(e: WheelEvent) {
+      /* let overlays with their own scrollbar scroll instead of panning */
+      if ((e.target as Element | null)?.closest('[data-stage-scroll]')) return
       e.preventDefault()
       if (e.ctrlKey || e.metaKey) {
         const rect = el!.getBoundingClientRect()
@@ -293,6 +240,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     function pinchOf(touches: TouchList) {
       const rect = el!.getBoundingClientRect()
       const [a, b] = [touches[0], touches[1]]
+      if (!a || !b) return null
       return {
         dist: Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY),
         x: (a.clientX + b.clientX) / 2 - rect.left,
@@ -309,6 +257,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       if (!prev || e.touches.length < 2) return
       e.preventDefault()
       const cur = pinchOf(e.touches)
+      if (!cur) return
       const vp = useStore.getState().viewport
       const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, vp.zoom * (cur.dist / Math.max(1, prev.dist))))
       const scale = zoom / vp.zoom
@@ -362,17 +311,10 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       })
     }
     function onKey(e: KeyboardEvent) {
-      if (useStore.getState().presentedFrameId) return
-      const t = e.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable) return
-      if (!e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && ['Digit0', 'Digit1', 'Digit2'].includes(e.code)) {
-        e.preventDefault()
-        if (e.code === 'Digit1') fit()
-        else if (e.code === 'Digit2') fitSelection()
-        else zoomTo(1)
-        return
-      }
+      if (useStore.getState().presentedFrameId || useStore.getState().exportFrameIds) return
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const t = e.target as HTMLElement
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
       if (e.key !== '0' && e.key !== '=' && e.key !== '+' && e.key !== '-') return
       /* '+' arrives as ⇧= on most layouts; any other shifted combo isn't ours */
       if (e.shiftKey && e.key !== '+') return
@@ -401,16 +343,10 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   useEffect(() => {
     function isTyping(e: KeyboardEvent) {
       const t = e.target as HTMLElement
-      return (
-        t.tagName === 'INPUT' ||
-        t.tagName === 'TEXTAREA' ||
-        t.tagName === 'SELECT' ||
-        !!t.closest('[role="tree"], [data-slot="panel"]') ||
-        t.isContentEditable
-      )
+      return t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable
     }
     function onDown(e: KeyboardEvent) {
-      if (useStore.getState().presentedFrameId) return
+      if (useStore.getState().presentedFrameId || useStore.getState().exportFrameIds) return
       if (e.key !== ' ' || isTyping(e)) return
       e.preventDefault()
       if (!useStore.getState().panMode) useStore.getState().setPanMode(true)
@@ -599,12 +535,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
             +
           </ToolbarButton>
           <ToolbarDivider />
-          <ToolbarButton onClick={fit} title="Fit all frames (Shift+1)">
-            Fit
-          </ToolbarButton>
-          <ToolbarButton onClick={fitSelection} title="Zoom to selection (Shift+2)">
-            Selection
-          </ToolbarButton>
+          <ToolbarButton onClick={fit}>Fit</ToolbarButton>
         </Toolbar>
 
         {canvas && (

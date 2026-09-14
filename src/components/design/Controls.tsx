@@ -128,7 +128,7 @@ export function DesignInput({
 function toHex(color: string): string {
   if (/^#[\da-f]{6}$/i.test(color)) return color
   const short = color.match(/^#([\da-f])([\da-f])([\da-f])$/i)
-  if (short) return `#${short[1].repeat(2)}${short[2].repeat(2)}${short[3].repeat(2)}`
+  if (short) return `#${short[1]!.repeat(2)}${short[2]!.repeat(2)}${short[3]!.repeat(2)}`
   const rgb = color.match(/^rgba?\((\d+)[, ]+\s*(\d+)[, ]+\s*(\d+)/)
   return rgb
     ? `#${rgb

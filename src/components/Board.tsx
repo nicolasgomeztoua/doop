@@ -18,6 +18,7 @@ import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Card } from './ui/card'
 import { Dot } from './ui/dot'
+import { RoleMark } from './RoleMark'
 
 /**
  * Board view over the canvas's tasks: queued cards humans leave for agents,
@@ -43,7 +44,6 @@ const metaCls =
 /* the ✕ on a card: always reachable on touch, revealed on hover elsewhere */
 const dismissCls =
   'absolute right-[9px] top-[9px] size-[22px] justify-center rounded-full p-0 text-xs opacity-100 hover:bg-paper-deep hover:text-ink sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100'
-const glyphCls = 'text-[10px] leading-none'
 const hintCls = 'text-[11.5px] text-ink-faint'
 
 const stepPhaseCls: Record<string, string> = {
@@ -100,7 +100,7 @@ function Trail({ task, state }: { task: AgentTask; state: 'queued' | 'working' |
             )}
             title={role?.blurb}
           >
-            <span className={glyphCls}>{role?.emoji ?? '✦'}</span>
+            <RoleMark role={role} size={13} />
             {role?.name ?? id}
           </span>
         )
@@ -134,8 +134,8 @@ function Team({ tasks, onPick }: { tasks: AgentTask[]; onPick: (id: string) => v
               onClick={() => onPick(role.id)}
               title={`Queue a card for ${role.name}`}
             >
-              <span className="flex flex-wrap items-baseline gap-x-[5px] gap-y-[2px] font-display text-[13px] font-[650] tracking-[-0.01em] text-ink">
-                <span className={glyphCls}>{role.emoji}</span>
+              <span className="flex flex-wrap items-center gap-x-[5px] gap-y-[2px] font-display text-[13px] font-[650] tracking-[-0.01em] text-ink">
+                <RoleMark role={role} size={16} />
                 {role.name}
                 <span className="font-mono text-[10px] font-normal text-ink-faint">@{role.id}</span>
               </span>
@@ -336,7 +336,7 @@ export function Board({ canvasId }: { canvasId: string }) {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault()
-                      submit()
+                      void submit()
                     }
                     if (e.key === 'Escape') setDraft(null)
                   }}
@@ -375,7 +375,7 @@ export function Board({ canvasId }: { canvasId: string }) {
                           title={role.blurb}
                           onClick={() => toggle(role.id)}
                         >
-                          <span className={glyphCls}>{role.emoji}</span>
+                          <RoleMark role={role} size={13} />
                           {role.name}
                           {at >= 0 && agents.length > 1 && (
                             <span className="grid h-[13px] min-w-[13px] place-items-center rounded-full bg-white/25 font-mono text-[9.5px]">
@@ -435,8 +435,9 @@ export function Board({ canvasId }: { canvasId: string }) {
                     className="animate-[stream-pulse_1.2s_ease-in-out_infinite]"
                     style={{ background: t.color }}
                   />
-                  <b>
-                    {roleByAgentName(t.agentName)?.emoji ?? '✦'} {t.agentName}
+                  <b className="inline-flex items-center gap-1">
+                    <RoleMark role={roleByAgentName(t.agentName)} size={13} />
+                    {t.agentName}
                   </b>
                   {t.owner && <span> · for {t.owner}</span>}
                   {t.queuedBy && <span> · card from {t.queuedBy}</span>}

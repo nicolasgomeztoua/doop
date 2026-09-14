@@ -4,7 +4,6 @@
  */
 
 import { AGENT_ROLES } from '../shared/agents.ts'
-import { STYLE_RECIPE_MENU } from './recipes.ts'
 
 export const GUIDE_TOPICS = ['doop-instructions'] as const
 
@@ -31,40 +30,44 @@ export const DESIGN_QUALITY = `- Commit to ONE clear aesthetic direction per fra
 - White space is a feature. Vary spacing deliberately — tight inside groups, generous
   between them.
 - Realistic content everywhere. No lorem ipsum, no "Your text here". When placeholder
-  content needs a design tool as an example, it is Doop — never a competitor.`
+  content needs a design tool as an example, it is Doop — never a competitor.
+- Logos are real, never placeholders. Every slot that shows a company mark — "trusted by"
+  walls, integration and "works with" rows, payment methods, press bars, app-store
+  badges, the company beside a testimonial — gets that company's actual logo fetched
+  with search_logos (one call per brand, by domain). Choose real, recognizable brands
+  that fit the product's audience instead of inventing "Acme" or "Globex". No gray
+  tiles, no "LOGO" text, no initials-in-a-circle, no hand-drawn brand marks.`
 
 /** The brief-first ritual with its inspiration-retrieval mandate. Shared by the
  *  MCP guide and the resident system prompt (both toolsets expose
- *  get_style_recipe, search_inspiration, set_status and save_decision) so the
- *  ritual cannot drift. */
+ *  search_inspiration, set_status and save_decision) so the ritual cannot drift. */
 export const DESIGN_BRIEF = `Before creating frames on a canvas whose style is not already established, commit to a
 brief. It is part of the deliverable, not private scratch work:
 
-1. **Retrieve inspiration first.** Scan the recipe menu below for your design's
-   category and fetch the closest match with get_style_recipe (fetching two and
-   picking the better fit beats guessing). A recipe is a starting point you ADAPT —
-   keep its logic (ground, accent discipline, type moves) and swap the specifics your
-   brief needs; copying it verbatim makes every canvas look the same. A near-miss
-   category still transfers: an appetite recipe can drive any bold consumer page.
-   When no recipe is even a near miss — or you want live exemplars beside one —
-   call search_inspiration with the category plus page type ("law firm landing
-   page"): you SEE real curated pages with their mood line, palette and fonts, and
-   distill your own direction from them.
+1. **Look at real pages first.** Call search_inspiration with the page archetype plus
+   the register you are aiming for — "B2B SaaS landing page, editorial", "dark fintech
+   dashboard", "consumer app landing, playful" — not the product noun on its own
+   ("AI meeting notes" matches on "AI" and returns noise). You SEE real, curated live
+   pages as thumbnails, each with its mood line, palette and fonts. Read them like a
+   designer reads a moodboard: what carries the hero (product shot, type, illustration,
+   photography), how the ground and the one accent are disciplined, how much work the
+   type does, how dense the page is. If the set all looks alike, run a second query in a
+   different register before deciding. Then pick ONE exemplar — the single page whose
+   direction fits the brief best — and follow it. Do not blend several pages into a
+   composite: a design that commits to one reference reads as intentional; a mix of
+   four reads as generic.
 2. **Write the brief**: mood candidates → the mood chosen (not your first instinct,
    and say why) → palette with roles (5–6 hexes) → type (faces, weights, scale) →
-   one-line direction. NAME the recipe you adapted or the search_inspiration
-   exemplars you distilled from — or state that none fit and the brief derives from
-   the design-quality principles alone.
+   hero device → one-line direction. NAME the one exemplar you are following and say
+   why it won — or state that none fit and the brief derives from the design-quality
+   principles alone.
 3. **Post it.** Summarize in set_status ("Designing grocery landing — candlelit mood,
-   via oatside-soft-shelf") and persist the full brief with save_decision so humans
-   and later agents see what you committed to.
+   after Oatside") and persist the full brief with save_decision so humans and later
+   agents see what you committed to.
 
 Skip the brief only when the canvas already dictates the style — established frames,
 style guides or pinned references — or when the human handed you a complete design
-system. Then those are the brief; follow them.
-
-Recipe menu (fetch full recipes with get_style_recipe):
-${STYLE_RECIPE_MENU}`
+system. Then those are the brief; follow them.`
 
 export const DOOP_GUIDE = `# Doop Agent Guide
 
@@ -141,6 +144,8 @@ and fix real issues before moving on:
   trailing actions do not form clean vertical lanes.
 - **Realism**: lorem ipsum or "Item 1 / Item 2" content — replace with plausible, specific
   copy (invented product names, believable numbers, human sentences).
+- **Logos**: any placeholder brand mark (gray tile, "LOGO", initials, an invented company
+  wordmark) still in the frame — replace it with a real logo from search_logos.
 
 Prefer targeted fixes over rewrites. Never delete and restart a mostly-good frame — the
 humans watching lose work they may have been reacting to.
@@ -204,16 +209,45 @@ any public image URL. Source images in this order:
   license-safe) with object-fit: cover and a real alt text. For an image the design
   will depend on long-term, pass image_url to upload_asset source_url for a permanent
   copy on this origin.
+- **Backgrounds — list_backgrounds.** A curated library of premium backgrounds for
+  hero sections, section bands and bento tiles: soft glows, grainy meshes, aurora
+  ribbons, neon, painterly landscapes. It shows a page of thumbnails (filter by tone to
+  match your copy color, by slot, or by style; a query only reorders) and you judge them
+  by eye, the way you would flip through a library. Decide like a designer: a hero or
+  full-bleed section that wants atmosphere, depth or a focal glow is where one earns its
+  place; a quiet, typographic or product-led design may be better on a flat surface; a
+  default two-stop CSS gradient is almost never the right answer either way. Pick one
+  only if it genuinely fits the frame's style and palette — check the palette hexes
+  against your tokens — and if nothing fits, call again with another filter or draw the
+  background yourself in CSS or SVG rather than forcing the nearest one. Each result
+  carries a ready css line with a legibility scrim and a text_zone — put the headline
+  there. One image per bento grid at most; keep the other tiles flat.
 - **UI icons — search_icons.** 200k+ open-source icons (Material, Lucide, Tabler,
   Phosphor, …). Search the concept ("shopping cart"). Hotlink the svg_url; recolor
   monochrome icons with ?color=%23<hex> and size with &height=<px>.
 - **Company logos — search_logos.** Search a brand name or, far more reliably, its
   exact domain ("acme.io") and get the company's real mark as a hotlinkable URL, plus
-  open-source vector marks for well-known brands. Use it for customer-logo walls,
-  integration rows, testimonial cards and press bars — never guess a logo URL or
-  redraw a brand mark by hand. Follow the size guidance in the result: favicon-sourced
-  logos are small rasters (fine at ≤32px, ugly scaled up); vector marks scale to any
-  size.
+  open-source vector marks for well-known brands. Call it the moment a design needs a
+  logo — customer-logo walls, integration rows, testimonial cards, press bars, payment
+  methods — once per brand, BEFORE writing that section's HTML, so the real URLs go in
+  on the first pass instead of placeholders you would have to swap later. Never guess a
+  logo URL, redraw a brand mark by hand, or ship a placeholder tile. If a brand returns
+  nothing, retry with its exact domain, then pick a different real brand rather than
+  inventing one. Follow the size guidance in the result: favicon-sourced logos are
+  small rasters (fine at ≤32px, ugly scaled up); vector marks scale to any size.
+- **Generated imagery — generate_image.** When no stock photo can be the visual — a
+  brand-specific illustration, a product render, a mascot, abstract hero art in the
+  frame's exact palette — or your human asks for a
+  generated image, generate one from a prompt. It returns a permanent URL on this origin
+  plus a preview: look at the preview and judge it like any other asset before it goes
+  in. It runs on your human's connected ChatGPT subscription or OpenAI key (else the
+  server's key) and costs them quota or money, and takes 20–60 seconds, so write ONE
+  considered prompt — subject, style, composition, palette hexes, lighting, what to
+  leave out — and refine a near miss by saying what was wrong rather than rolling the
+  dice again. Match aspect to the slot (square, landscape, portrait). Images come back
+  opaque — no transparent cut-outs — so place them in a box, mask them with CSS, or
+  prompt for the surface color you will put them on. Photography that exists in the
+  world is still search_images' job.
 - **Your own file — upload_asset** (png/jpg/webp/gif/svg, max 5 MB), with the
   canvas_id it belongs to and ONE input, chosen by where the file lives:
   - Remote (it has a public URL): pass source_url — the server fetches it directly.
@@ -228,9 +262,10 @@ any public image URL. Source images in this order:
 - **When to use them.** Enumerated content — feature cards, step lists, capability
   grids, value rows — needs a visual anchor per item: an icon (search_icons), a big
   number, or a mono label. Naked text lists read as drafts. Pick ONE anchor style per
-  section and never use emoji as icons. Logos: real marks (search_logos) for real
-  things — integrations, platforms, payment methods; invented customers and
-  testimonials stay text wordmarks, never a real company's mark.
+  section and never use emoji as icons. Logos: always real marks from search_logos —
+  integrations, platforms, payment methods, and the customer walls and testimonial
+  cards too. Pick real brands the product's audience would recognize; invented quotes
+  can sit beside a real company mark, but a placeholder mark is never acceptable.
 - **Nothing fits — draw it.** Inline SVG or pure CSS (gradients, patterns, shapes) in
   the frame. Never ship a gray "image goes here" box, and never guess an image URL
   from memory — unverified URLs are usually dead.
@@ -288,9 +323,9 @@ commit to directions, then deliver a choice:
   rhythm, radii, shadows, patterns, backgrounds, component styling, section layout.
   "Direction B — further out": same product, same real copy and facts, but freer —
   reinterpret the palette and push the aesthetic somewhere genuinely different.
-  Direction B must NOT be invented from vibes: retrieve category inspiration —
-  get_style_recipe for the closest recipe, search_inspiration for live exemplars —
-  adapt it, and name it in the redesign doc so the direction is traceable.
+  Direction B must NOT be invented from vibes: retrieve category inspiration with
+  search_inspiration (live exemplars with their mood, palette and fonts), pick ONE
+  exemplar and follow it, and name it in the redesign doc so the direction is traceable.
 - Deliver TWO new frames side by side, named "<source> — A (on-brand)" and
   "<source> — B (departure)", each executing its direction precisely; screenshot both.
   In both: keep the source's real copy and product facts, restructure sections when it

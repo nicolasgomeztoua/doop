@@ -7,11 +7,14 @@ import { inspectFrame, renderFrame } from './screenshot.ts'
 import { AGENT_ROLES, DEFAULT_ROLE_ID, roleById, roleByAgentName, roleName } from '../shared/agents.ts'
 import type { AgentRole } from '../shared/agents.ts'
 import * as imageSearch from './imageSearch.ts'
+import * as imageGen from './imageGen.ts'
+import * as assets from './assets.ts'
+import * as backgrounds from './backgrounds.ts'
+import { PUBLIC_ORIGIN } from './auth.ts'
 import * as ingest from './ingest.ts'
 import { viewWebsite, referencedUrls } from './website.ts'
 import { createImportedWebpageFrame, findImportedWebpageFrame } from './webpageImport.ts'
 import { DESIGN_BRIEF, DESIGN_QUALITY } from './guide.ts'
-import { getStyleRecipe } from './recipes.ts'
 import { describeInspiration, INSPIRATION_USAGE_NOTE, searchInspiration } from './inspiration.ts'
 import type { Frame } from '../shared/types.ts'
 import { websiteAccessErrorMessage } from './websiteAccess.ts'
@@ -106,7 +109,7 @@ Rules:
 - Call set_status when you start ("Fixing: …") and when your focus shifts. One line, under 80 chars, present tense. People watch this live.
 - Never leave a frame worse than you found it.
 - Reference sites: when a request names a site or URL — a redesign of it, or "like acme.com" — call import_webpage with as_reference=true FIRST so an editable HTML snapshot lands on the canvas, then call screenshot_frame on that imported source and design from what is actually there: its real copy, nav labels, product facts, and imagery direction. Leave the imported source unchanged and deliver your work in a separate frame. If importing or editing the snapshot itself is the requested deliverable, use as_reference=false. view_website is read-only; use it only when you need to inspect a live page without adding it to the canvas. A redesign that invents content is wrong even when it looks good. If automated access is blocked and there is no existing source frame or attached screenshot, stop and ask the user to attach screenshots; never approximate the site from guesses.
-- Real imagery: when a design calls for photography, use search_images (you see thumbnails — pick the one whose mood and palette fit) and embed its image_url with object-fit: cover and a real alt text. For UI icons use search_icons and hotlink the SVG URL; for company logos (customer walls, integration rows, press bars) use search_logos. Never fake a photo with a gray box or a made-up URL; if search is unavailable, draw the visual as inline SVG/CSS.
+- Real imagery: when a design calls for photography, use search_images (you see thumbnails — pick the one whose mood and palette fit) and embed its image_url with object-fit: cover and a real alt text. For a hero, section band or bento tile that wants atmosphere or a focal glow, list_backgrounds shows a page of the curated library as thumbnails (filter by tone; judge by eye which one fits the frame's style and palette, paste its css line, put copy in the text_zone); a quiet typographic design may be better on a flat surface, but never settle for a default two-stop gradient, and draw the background yourself when nothing in the library genuinely fits. For UI icons use search_icons and hotlink the SVG URL. For company logos (customer walls, integration rows, press bars, payment methods, testimonial cards) call search_logos once per brand BEFORE writing that section, and use real, recognizable brands — never a gray tile, "LOGO" text, initials or an invented wordmark. When the design needs a visual that stock cannot supply — brand-specific illustration, a product render, a mascot, abstract hero art in the exact palette — or the card asks for a generated image, call generate_image with ONE considered prompt (subject, style, composition, palette hexes, lighting, exclusions) and embed the returned url; it spends the requester's quota or money, so refine a near miss by prompt rather than regenerating blind. Never fake a photo with a gray box or a made-up URL; if search is unavailable, draw the visual as inline SVG/CSS.
 - If a request is unclear or impossible (missing frame, contradictory ask), do the closest reasonable thing and say what you did in your final message.
 - Your final message should be one or two sentences: what you changed and where.
 
@@ -141,7 +144,14 @@ interface RunState {
   verifiedFrames: Set<string>
   rewriteDrafts: Map<string, string>
   blockedWebsiteAccess?: string
+  /** whose account pays for generated images: the run's payer, else the server key */
+  payerId?: string
+  /** images actually produced in this run — capped, since each one spends the payer's quota or money */
+  imagesGenerated: number
 }
+
+/* enough for a hero plus a retry or two; a run that wants more is looping */
+const MAX_IMAGES_PER_RUN = 4
 
 function deliverableFrameIds(runState: RunState): string[] {
   return [...runState.mutatedFrames].filter((id) => !runState.sourceFrames.has(id))
@@ -166,7 +176,7 @@ function strategyFor(text: string, frames: NonNullable<ReturnType<typeof store.g
   const redesignNote = isRedesign
     ? ' For the redesign itself, work audit-first and deliver TWO drafts:' +
       ' (1) Audit the source — inspect_frame on a source frame for its computed palette, type, spacing, radii and shadows (import_webpage first for a live site), plus a screenshot for layout.' +
-      ' (2) Persist the audit with set_guidelines as a doc named "redesign-<source>" (e.g. "redesign-pipefile-com"): a "Source baseline" recording the old system (palette hexes, type, spacing/radii, and the section map — each section\'s purpose and one-line message) as a descriptive record of what you are redesigning away from, NOT rules to follow; then two binding directions. "Direction A — closer to home": the brand stays recognizable — logo, name, core brand colors (re-weighted freely, with new neutrals and tints) — while every detail is redesigned: typography, spacing rhythm, radii, shadows, patterns, background treatments, button and component styling, section layout. "Direction B — further out": same product, same real copy and facts, but freer — reinterpret the palette and push the aesthetic somewhere genuinely different; do not invent it from vibes — retrieve category inspiration (get_style_recipe for the closest recipe, search_inspiration for live exemplars), adapt it, and name it in the redesign doc.' +
+      ' (2) Persist the audit with set_guidelines as a doc named "redesign-<source>" (e.g. "redesign-pipefile-com"): a "Source baseline" recording the old system (palette hexes, type, spacing/radii, and the section map — each section\'s purpose and one-line message) as a descriptive record of what you are redesigning away from, NOT rules to follow; then two binding directions. "Direction A — closer to home": the brand stays recognizable — logo, name, core brand colors (re-weighted freely, with new neutrals and tints) — while every detail is redesigned: typography, spacing rhythm, radii, shadows, patterns, background treatments, button and component styling, section layout. "Direction B — further out": same product, same real copy and facts, but freer — reinterpret the palette and push the aesthetic somewhere genuinely different; do not invent it from vibes — retrieve category inspiration with search_inspiration (live exemplars with mood, palette and fonts), pick ONE exemplar and follow it, and name it in the redesign doc.' +
       ' (3) Deliver TWO new frames side by side, named "<source> — A (on-brand)" and "<source> — B (departure)", each executing its direction precisely; screenshot both. Both frames together are this card\'s deliverable. In both: keep the source\'s real copy and product facts, restructure sections when it strengthens the page\'s argument, and give details a genuinely new treatment rather than reordering the old elements.' +
       ' Exception: if the request already fixes the scope ("keep it subtle", "same style", "go wild", "rebrand"), deliver ONE draft at that scope instead.' +
       ' If your canvas guidelines already include a redesign doc for this source, skip (1)-(2) and follow its directions.'
@@ -398,6 +408,8 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       verificationFrames: new Set(),
       verifiedFrames: new Set(),
       rewriteDrafts: new Map(),
+      ...(model.userId ? { payerId: model.userId } : {}),
+      imagesGenerated: 0,
     }
     let refused = false
     let crashed = false
@@ -744,6 +756,52 @@ const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'generate_image',
+    description:
+      "Generate an image from a text prompt with AI and get a permanent URL to embed, plus a preview to judge. For visuals stock search cannot supply: brand-specific illustration, product renders, mascots, abstract hero art in the frame's exact palette. Prefer search_images for ordinary photography. It spends the requester's ChatGPT quota or OpenAI money and takes 20–60 seconds, so write ONE considered prompt (subject, style, composition, palette hexes, lighting, what to leave out) and refine a near miss by prompt.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'What to draw: subject, style, composition, palette, lighting, mood' },
+        aspect: {
+          type: 'string',
+          enum: [...imageGen.IMAGE_ASPECTS],
+          description: 'square 1024×1024 (default), landscape 1536×1024, portrait 1024×1536 — match the slot',
+        },
+        quality: {
+          type: 'string',
+          enum: [...imageGen.IMAGE_QUALITIES],
+          description: 'low is fast and cheap; default medium',
+        },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
+    name: 'list_backgrounds',
+    description:
+      "Browse a curated library of premium backgrounds for hero sections, section bands and bento tiles (glows, grainy meshes, aurora, neon, painterly scenes) as a page of thumbnails, each with palette hexes and a ready-to-paste CSS line that includes a legibility scrim. Reach for it when a hero or full-bleed section wants atmosphere, depth or a focal glow; a quiet typographic design can stay flat, but a default two-stop gradient is rarely right. Filter by tone (light/dark — match your copy color), slot and style; an optional query only reorders. Then decide like a designer: does one genuinely fit the frame's style and palette? If yes use it and put copy in its text_zone; if not, call again with a different filter or draw the background yourself.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Mood / palette words to put first — reorders, never filters' },
+        tone: {
+          type: 'string',
+          enum: [...backgrounds.BACKGROUND_TONES],
+          description: 'light = dark copy on it, dark = light copy on it',
+        },
+        style: { type: 'string', enum: [...backgrounds.BACKGROUND_STYLES], description: 'Restrict to one look' },
+        slot: {
+          type: 'string',
+          enum: [...backgrounds.BACKGROUND_SLOTS],
+          description: 'hero, section band, or card/bento tile',
+        },
+        count: { type: 'number', description: 'Thumbnails to return, 1-24, default 12' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'search_icons',
     description:
       'Search 200,000+ open-source UI icons, returned as hotlinkable SVG URLs. Search the concept ("shopping cart", "arrow right"). Results are semantically named ids — pick by name. For company logos use search_logos instead.',
@@ -811,25 +869,17 @@ const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: 'get_style_recipe',
-    description:
-      'Fetch one of the built-in style recipes — complete, executable style directions (mood north star, palette with roles, type pairing, signature moves) distilled from real gallery exemplars. The design-brief ritual in your instructions lists the menu; fetch the closest match for your category before writing a brief, then ADAPT it to the brand rather than copying it verbatim.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Recipe slug from the menu in your instructions' },
-      },
-      required: ['name'],
-    },
-  },
-  {
     name: 'search_inspiration',
     description:
-      'Search a curated gallery of real, well-designed live websites by category and SEE thumbnails with pre-distilled style facts (one-line mood north star, named palette, fonts). Use it while writing a design brief — especially for landing pages — when no built-in recipe fits the category, or alongside one: query the category plus the page type ("law firm landing page", "dark fintech dashboard"). Adapt what you see into the brief and name the exemplars; never embed these screenshots or copy an identity.',
+      'Search a curated gallery of real, well-designed live websites by category and SEE thumbnails with pre-distilled style facts (one-line mood north star, named palette, fonts). Call it FIRST when writing a design brief — it is the required inspiration step, especially for landing pages: query the page archetype plus the register you want ("law firm landing page, editorial", "dark fintech dashboard"), not just the product noun. Study the thumbnails, pick the ONE exemplar that fits the brief best and follow it — do not blend several — and name it in the brief. Do not embed these screenshots in a frame.',
     input_schema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Category + page type, e.g. "grocery delivery landing page"' },
+        query: {
+          type: 'string',
+          description:
+            'Page archetype + register, e.g. "grocery delivery landing page, warm", "dark fintech dashboard"',
+        },
         count: { type: 'number', description: 'Exemplars to return, default 4, max 6' },
       },
       required: ['query'],
@@ -838,7 +888,7 @@ const TOOLS: Anthropic.Tool[] = [
   {
     name: 'save_decision',
     description:
-      'Persist a design decision to the canvas Memory so humans and later agents see what was committed to — this is how you post your design brief (mood, recipe adapted, palette roles, type). Keep it under 500 chars. Design taste only, never one-off content edits.',
+      'Persist a design decision to the canvas Memory so humans and later agents see what was committed to — this is how you post your design brief (mood, the one exemplar followed, palette roles, type). Keep it under 500 chars. Design taste only, never one-off content edits.',
     input_schema: {
       type: 'object',
       properties: {
@@ -921,7 +971,7 @@ async function execTool(
   actor: ReturnType<typeof actions.resolveActor>,
   runState: RunState,
 ): Promise<Anthropic.ToolResultBlockParam> {
-  const input = block.input as Record<string, string>
+  const input = block.input as { frame_id: string } & Record<string, string>
   const fail = (msg: string): Anthropic.ToolResultBlockParam => ({
     type: 'tool_result',
     tool_use_id: block.id,
@@ -1110,6 +1160,74 @@ async function execTool(
         })
         return ok(blocks)
       }
+      case 'generate_image': {
+        const raw = block.input as { prompt?: string; aspect?: string; quality?: string }
+        const prompt = String(raw.prompt || '').trim()
+        if (!prompt) return fail('prompt must be a non-empty string')
+        if (runState.imagesGenerated >= MAX_IMAGES_PER_RUN) {
+          return fail(
+            `this task has already generated ${MAX_IMAGES_PER_RUN} images — use one of them, or finish and let your human ask for more`,
+          )
+        }
+        const aspect = (imageGen.IMAGE_ASPECTS as readonly string[]).includes(String(raw.aspect))
+          ? (raw.aspect as imageGen.ImageAspect)
+          : undefined
+        const quality = (imageGen.IMAGE_QUALITIES as readonly string[]).includes(String(raw.quality))
+          ? (raw.quality as imageGen.ImageQuality)
+          : undefined
+        const image = await imageGen.generateImage(runState.payerId, { prompt, aspect, quality })
+        const asset = await assets.createAsset(image.buf, {
+          canvasId,
+          ...(runState.payerId ? { ownerId: runState.payerId } : {}),
+          uploadedBy: actor.name,
+        })
+        /* counted once an image actually exists: a refusal or a transient
+           failure spent nothing and must not lock the tool for the run */
+        runState.imagesGenerated++
+        const url = `${PUBLIC_ORIGIN}/a/${asset.id}.${asset.ext}`
+        return ok([
+          { type: 'image', source: { type: 'base64', media_type: image.preview.mime, data: image.preview.data } },
+          {
+            type: 'text',
+            text: `Generated ${image.width}×${image.height} (${asset.mime}, billed to ${image.billedTo}) — preview above, judge it before embedding.\nurl: ${url}\nusage: <img src="${url}" alt="" style="object-fit: cover">`,
+          },
+        ])
+      }
+      case 'list_backgrounds': {
+        if (!backgrounds.backgroundsEnabled())
+          return fail(
+            'the background library is empty on this server — draw the background as layered CSS gradients instead',
+          )
+        const raw = block.input as { query?: string; tone?: string; style?: string; slot?: string; count?: number }
+        const query = String(raw.query || '').trim() || undefined
+        const pick = <T extends string>(list: readonly T[], v: unknown): T | undefined =>
+          list.includes(v as T) ? (v as T) : undefined
+        const listing = backgrounds.browseBackgrounds(
+          {
+            query,
+            tone: pick(backgrounds.BACKGROUND_TONES, raw.tone),
+            style: pick(backgrounds.BACKGROUND_STYLES, raw.style),
+            slot: pick(backgrounds.BACKGROUND_SLOTS, raw.slot),
+            count: Number(raw.count) || undefined,
+          },
+          PUBLIC_ORIGIN,
+        )
+        const { results } = listing
+        if (results.length === 0)
+          return ok('no backgrounds match the tone/style/slot filters you set — drop one and call again')
+        const thumbs = await Promise.all(results.map((r) => backgrounds.fetchThumb(r.id)))
+        const blocks: NonNullable<Exclude<Anthropic.ToolResultBlockParam['content'], string>> = [
+          { type: 'text', text: backgrounds.listHeadline(listing, query) },
+        ]
+        results.forEach((r, i) => {
+          const thumb = thumbs[i]
+          if (thumb)
+            blocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/webp', data: thumb.data } })
+          blocks.push({ type: 'text', text: backgrounds.describeBackground(r, i) })
+        })
+        blocks.push({ type: 'text', text: backgrounds.BACKGROUND_USAGE_NOTE })
+        return ok(blocks)
+      }
       case 'search_icons': {
         const raw = block.input as { query?: string; limit?: number }
         const query = String(raw.query || '').trim()
@@ -1127,7 +1245,7 @@ async function execTool(
         const { brands, vector } = await imageSearch.lookupLogos(query, Number(raw.count) || undefined)
         if (brands.length === 0 && vector.length === 0) {
           return ok(
-            `no logo found for "${query}" — retry with the company's exact domain (e.g. "acme.io"), or draw a neutral wordmark in HTML/CSS instead of guessing a logo URL`,
+            `no logo found for "${query}" — retry with the company's exact domain (e.g. "acme.io"); if that also fails, search a different real brand instead of drawing a placeholder or guessing a logo URL`,
           )
         }
         const blocks: NonNullable<Exclude<Anthropic.ToolResultBlockParam['content'], string>> = [
@@ -1251,11 +1369,6 @@ async function execTool(
             `HTML${truncated ? ` (first ${MAX_HTML_READ_CHARS} of ${ref.html.length} characters — lift the design tokens from the <style> head and the screenshot)` : ''}:\n${ref.html.slice(0, MAX_HTML_READ_CHARS)}`,
         })
         return ok(blocks)
-      }
-      case 'get_style_recipe': {
-        const recipe = getStyleRecipe(String(input.name ?? ''))
-        if (!recipe) return fail(`no recipe named "${input.name}" — use a slug from the menu in your instructions`)
-        return ok(`# ${recipe.title} (${recipe.category})\n\n${recipe.markdown}`)
       }
       case 'search_inspiration': {
         const raw = block.input as { query?: string; count?: number }

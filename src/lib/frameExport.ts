@@ -20,7 +20,7 @@ export async function prepareFrameExport(
   if (!frames.length) throw new Error('Select at least one frame to export.')
   if (frames.length > 100) throw new Error('Export up to 100 frames at a time.')
   if (options.crop && frames.length !== 1) throw new Error('Select one frame when exporting an element.')
-  const crop = options.crop ? clipExportRegion(frames[0], options.crop) : undefined
+  const crop = options.crop ? clipExportRegion(frames[0]!, options.crop) : undefined
   for (const frame of frames) {
     const error = exportSizeError(crop ?? frame, options.scale)
     if (error) throw new Error(`${frame.name}: ${error}`)
@@ -86,7 +86,7 @@ export async function prepareFrameExport(
         } finally {
           bitmap.close()
         }
-      } else files[names[index]] = data
+      } else files[names[index]!] = data
       onProgress(index + 1)
     }
     signal.throwIfAborted()
@@ -103,10 +103,10 @@ export async function prepareFrameExport(
     }
     if (frames.length === 1) {
       return {
-        blob: new Blob([files[names[0]] as Uint8Array<ArrayBuffer>], {
+        blob: new Blob([files[names[0]!] as Uint8Array<ArrayBuffer>], {
           type: options.format === 'jpg' ? 'image/jpeg' : 'image/png',
         }),
-        name: names[0],
+        name: names[0]!,
       }
     }
     // Images are already compressed; storing them avoids needless CPU work.

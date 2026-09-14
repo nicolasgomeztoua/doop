@@ -50,15 +50,22 @@ interface State {
   /** the Inspector panel is showing — opened by clicking a frame's name, not
    *  by mere selection, so clicking around a frame doesn't slide the panel in */
   inspectorOpen: boolean
-  /** Frame IDs captured when opening the export dialog. */
+  presentedFrameId: string | null
   exportFrameIds: string[] | null
   exportElement: ElementExport | null
-  selectedElement: (ElementExport & { frameId: string }) | null
   /** open frame context menu; deferPanel hides the Inspector until it closes
    *  (right-click selecting a frame must not slide a panel in under the menu) */
   ctxMenu: { frameId: string; deferPanel: boolean } | null
-  /** frame shown in the presentation overlay; the canvas stays mounted */
-  presentedFrameId: string | null
+  /** the element outlined inside the selected frame — a click on the frame
+   *  surface and a click on a Layers row both land here, so the outline in
+   *  the frame and the highlighted row stay in step */
+  selectedElement: { frameId: string; selector: string } | null
+  /** the element properties panel is showing — opened by a pick (a click on
+   *  the frame surface or a Layers row), it then follows whatever element is
+   *  selected until it is closed */
+  elementPanelOpen: boolean
+  /** the Layers rail is showing (desktop); the choice sticks across visits */
+  layersOpen: boolean
   viewport: Viewport
   /** live alignment guide lines while a frame drag is snapped to a neighbour */
   snapGuides: SnapGuide[]
@@ -79,6 +86,10 @@ interface State {
    *  raises it so a first deliverable streams in on-screen, never off-canvas */
   flyTo: { frameId: string; at: number } | null
 
+  presentFrame(id: string | null): void
+  openExport(frameId?: string): void
+  openElementExport(frameId: string, element: ElementExport): void
+  closeExport(): void
   setCanvas(c: Canvas | null): void
   setConnected(v: boolean): void
   setUpdateReady(v: boolean): void
@@ -119,17 +130,29 @@ interface State {
   selectMany(ids: string[]): void
   setPanMode(v: boolean): void
   setInspectorOpen(v: boolean): void
-  setSelectedElement(frameId: string, element: ElementExport | null): void
-  openExport(frameId?: string): void
-  openElementExport(frameId: string, element: ElementExport): void
-  closeExport(): void
   openCtxMenu(menu: { frameId: string; deferPanel: boolean }): void
   closeCtxMenu(): void
-  presentFrame(id: string | null): void
+  setSelectedElement(el: { frameId: string; selector: string } | null): void
+  /** an element picked by the user — on the frame surface or in the Layers
+   *  rail: selects it and opens its properties panel; picking nothing clears
+   *  the selection and closes the panel */
+  pickElement(el: { frameId: string; selector: string } | null): void
+  setElementPanelOpen(v: boolean): void
+  setLayersOpen(v: boolean): void
   setViewport(v: Viewport): void
   setSnapGuides(guides: SnapGuide[]): void
   flash(frameId: string, color: string): void
   setStream(frameId: string, actor: { name: string; color: string } | null): void
+}
+
+const LAYERS_OPEN_KEY = 'doop:layers-open'
+
+function readLayersOpen(): boolean {
+  try {
+    return localStorage.getItem(LAYERS_OPEN_KEY) !== '0'
+  } catch {
+    return true
+  }
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -149,12 +172,14 @@ export const useStore = create<State>((set, get) => ({
   selectedIds: [],
   selectedId: null,
   panMode: false,
-  inspectorOpen: false,
+  presentedFrameId: null,
   exportFrameIds: null,
   exportElement: null,
-  selectedElement: null,
+  inspectorOpen: false,
   ctxMenu: null,
-  presentedFrameId: null,
+  selectedElement: null,
+  elementPanelOpen: false,
+  layersOpen: readLayersOpen(),
   viewport: { x: 0, y: 0, zoom: 1 },
   snapGuides: [],
   connected: false,
@@ -165,7 +190,9 @@ export const useStore = create<State>((set, get) => ({
   setCanvas: (canvas) =>
     set((s) => ({
       canvas,
-      ...(!canvas ? { exportFrameIds: null, exportElement: null, selectedElement: null } : {}),
+      ...(canvas?.id !== s.canvas?.id
+        ? { exportFrameIds: null, exportElement: null, selectedElement: null, elementPanelOpen: false }
+        : {}),
       presentedFrameId: canvas?.frames.some((f) => f.id === s.presentedFrameId) ? s.presentedFrameId : null,
     })),
   setConnected: (connected) => set({ connected }),
@@ -244,7 +271,9 @@ export const useStore = create<State>((set, get) => ({
       const selectedIds = s.selectedIds.filter((id) => id !== frameId)
       return {
         canvas: { ...s.canvas, frames: s.canvas.frames.filter((f) => f.id !== frameId) },
+        presentedFrameId: s.presentedFrameId === frameId ? null : s.presentedFrameId,
         selectedElement: s.selectedElement?.frameId === frameId ? null : s.selectedElement,
+        elementPanelOpen: s.selectedElement?.frameId === frameId ? false : s.elementPanelOpen,
         selectedIds,
         /* losing the primary promotes the last surviving member, so a group
            never sits selected with nothing driving the Inspector/presence */
@@ -252,7 +281,6 @@ export const useStore = create<State>((set, get) => ({
         /* an open Inspector must not silently retarget onto the promoted frame */
         inspectorOpen: s.selectedId === frameId ? false : s.inspectorOpen,
         ctxMenu: s.ctxMenu?.frameId === frameId ? null : s.ctxMenu,
-        presentedFrameId: s.presentedFrameId === frameId ? null : s.presentedFrameId,
       }
     }),
   renameCanvasLocal: (name) => set((s) => (s.canvas ? { canvas: { ...s.canvas, name } } : {})),
@@ -294,7 +322,7 @@ export const useStore = create<State>((set, get) => ({
   setPanelTab: (panelTab) => set({ panelTab }),
   setLimitWall: (limitWall) => set({ limitWall }),
   allowanceChanged: () => set((s) => ({ allowanceVersion: s.allowanceVersion + 1 })),
-  requestFlyTo: (frameId) => set({ flyTo: { frameId, at: Date.now() } }),
+  requestFlyTo: (frameId) => set((s) => (s.presentedFrameId ? s : { flyTo: { frameId, at: Date.now() } })),
   /* selecting a different frame (or deselecting) closes the Inspector — the
      panel must not follow surface clicks, paste, or undo onto another frame.
      Re-selecting the same frame keeps an open panel open. */
@@ -302,58 +330,65 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       const selectedIds = selectedId ? [selectedId] : []
       return s.selectedId === selectedId
-        ? { selectedId, selectedIds, selectedElement: null }
-        : { selectedId, selectedIds, inspectorOpen: false, selectedElement: null }
+        ? { selectedId, selectedIds }
+        : { selectedId, selectedIds, inspectorOpen: false, selectedElement: null, elementPanelOpen: false }
     }),
   toggleSelect: (id) =>
     set((s) => {
       const selectedIds = s.selectedIds.includes(id) ? s.selectedIds.filter((x) => x !== id) : [...s.selectedIds, id]
       const selectedId = selectedIds[selectedIds.length - 1] ?? null
       return selectedId === s.selectedId
-        ? { selectedIds, selectedElement: null }
-        : { selectedIds, selectedId, inspectorOpen: false, selectedElement: null }
+        ? { selectedIds }
+        : { selectedIds, selectedId, inspectorOpen: false, selectedElement: null, elementPanelOpen: false }
     }),
   selectMany: (ids) =>
     set((s) => {
       const selectedId = ids[ids.length - 1] ?? null
       return selectedId === s.selectedId
-        ? { selectedIds: ids, selectedElement: null }
-        : { selectedIds: ids, selectedId, inspectorOpen: false, selectedElement: null }
+        ? { selectedIds: ids }
+        : { selectedIds: ids, selectedId, inspectorOpen: false, selectedElement: null, elementPanelOpen: false }
     }),
   setPanMode: (panMode) => set({ panMode }),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
   openCtxMenu: (ctxMenu) => set({ ctxMenu }),
-  setSelectedElement: (frameId, element) =>
-    set((s) => {
-      if (element && s.selectedIds.length === 1 && s.selectedId === frameId) {
-        return { selectedElement: { ...element, frameId } }
-      }
-      return s.selectedElement?.frameId === frameId ? { selectedElement: null } : s
-    }),
-  openExport: (frameId) =>
-    set((s) => {
-      const ids = frameId && !s.selectedIds.includes(frameId) ? [frameId] : s.selectedIds
-      const exportFrameIds = ids.filter((id) => s.canvas?.frames.some((f) => f.id === id))
-      const element =
-        !frameId && exportFrameIds.length === 1 && s.selectedElement?.frameId === exportFrameIds[0]
-          ? s.selectedElement
-          : null
-      return { exportFrameIds: exportFrameIds.length ? exportFrameIds : null, exportElement: element }
-    }),
-  openElementExport: (frameId, element) =>
-    set((s) =>
-      s.canvas?.frames.some((f) => f.id === frameId)
-        ? { exportFrameIds: [frameId], exportElement: element }
-        : { exportFrameIds: null, exportElement: null },
-    ),
-  closeExport: () => set({ exportFrameIds: null, exportElement: null }),
   closeCtxMenu: () => set({ ctxMenu: null }),
+  setSelectedElement: (selectedElement) =>
+    set((s) =>
+      s.selectedElement?.frameId === selectedElement?.frameId &&
+      s.selectedElement?.selector === selectedElement?.selector
+        ? s
+        : { selectedElement },
+    ),
+  pickElement: (el) =>
+    set((s) => {
+      if (!el) return s.selectedElement || s.elementPanelOpen ? { selectedElement: null, elementPanelOpen: false } : s
+      const same = s.selectedElement?.frameId === el.frameId && s.selectedElement?.selector === el.selector
+      if (same && s.elementPanelOpen) return s
+      return { selectedElement: same ? s.selectedElement : el, elementPanelOpen: true }
+    }),
+  setElementPanelOpen: (elementPanelOpen) => set({ elementPanelOpen }),
+  setLayersOpen: (layersOpen) => {
+    try {
+      localStorage.setItem(LAYERS_OPEN_KEY, layersOpen ? '1' : '0')
+    } catch {
+      /* private mode: the choice just doesn't stick */
+    }
+    set({ layersOpen })
+  },
   presentFrame: (id) =>
     set((s) => ({
       presentedFrameId: s.canvas?.frames.some((f) => f.id === id) ? id : null,
       panMode: false,
+      flyTo: null,
     })),
-  /* Freeze pending wheel ticks and agent camera requests as well as input. */
+  openExport: (frameId) =>
+    set((s) => {
+      const ids = frameId && !s.selectedIds.includes(frameId) ? [frameId] : s.selectedIds
+      const exportFrameIds = ids.filter((id) => s.canvas?.frames.some((f) => f.id === id))
+      return { exportFrameIds: exportFrameIds.length ? exportFrameIds : null, exportElement: null }
+    }),
+  openElementExport: (frameId, element) => set({ exportFrameIds: [frameId], exportElement: element }),
+  closeExport: () => set({ exportFrameIds: null, exportElement: null }),
   setViewport: (viewport) => set((s) => (s.presentedFrameId ? s : { viewport })),
   /* fires on every pointermove during a drag — skip the no-op transitions
      so unsnapped drags don't render the (empty) guide layer each frame */

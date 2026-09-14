@@ -279,6 +279,28 @@ promotion still requires the normal `ADMIN_EMAILS` path (verified signup, or
 
 Env: see the OIDC block in [.env.example](.env.example).
 
+### Sign in with Google
+
+Optional, alongside email/password and SSO. Create an OAuth client (Web application) in
+the [Google Cloud console](https://console.cloud.google.com/apis/credentials), add
+`<BETTER_AUTH_URL>/api/auth/callback/google` as an authorised redirect URI, and set
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` together (one without the other refuses to
+boot). The login page shows a "Sign in with Google" button whenever both are set. Account
+linking and admin promotion follow the same rules as SSO above; `SIGNUP_EMAIL_DOMAINS`
+applies to Google (and SSO) sign-ups exactly as it does to email/password.
+
+### Sign in with Microsoft
+
+Same shape as Google. Register an app in [Microsoft Entra](https://entra.microsoft.com)
+(App registrations, platform Web) with `<BETTER_AUTH_URL>/api/auth/callback/microsoft` as a
+redirect URI, create a client secret, and set `MICROSOFT_CLIENT_ID` and
+`MICROSOFT_CLIENT_SECRET` together. `MICROSOFT_TENANT_ID` (default `common`, any Microsoft
+account) can be `organizations`, `consumers`, or your tenant id to make the button an
+org-only door. Microsoft does not assert email ownership unless the app registration's
+ID token includes the `email` and `verified_primary_email` optional claims; without them a
+Microsoft sign-in still works but only links to an existing account that is already
+verified. Everything else (allowlist, admin promotion) follows the SSO rules above.
+
 ## Agent auth (MCP OAuth)
 
 The `/mcp` endpoint requires OAuth. Adding the server in Claude Code / Codex triggers
@@ -415,6 +437,7 @@ Steering happens at three layers (the same architecture paper.design uses, plus 
 | `edit_frame_html`      | Targeted exact find/replace in a frame's HTML — morphs into the render in place                                     |
 | `update_frame`         | Rename / move / resize a frame                                                                                      |
 | `delete_frame`         | Remove a frame                                                                                                      |
+| `generate_image`       | Generate an image from a prompt with AI (on the user's ChatGPT/OpenAI account, else `OPENAI_API_KEY`) → asset URL   |
 
 Mutating tools accept `agent_name`; the agent then appears in the presence stack (pulsing square avatar),
 gets an "editing" ring + chip on the frame it touched, and its actions land in the activity feed. Agents

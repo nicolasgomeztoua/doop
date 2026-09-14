@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
-import type { Canvas } from '../../shared/types'
+import {
+  COMMUNITY_CATEGORIES,
+  COMMUNITY_CATEGORY_LABELS,
+  type Canvas,
+  type CommunityCategory,
+} from '../../shared/types'
 import { navigate } from '../App'
 import { api, ApiError, type CanvasMember } from '../lib/api'
 import { authClient } from '../lib/auth'
@@ -10,9 +15,16 @@ import { Checkbox } from './ui/checkbox'
 import { XIcon } from './ui/icons'
 import { Input } from './ui/input'
 import { Modal, ModalTitle } from './ui/modal'
+import { Textarea } from './ui/textarea'
+import { ToggleChipGroup, ToggleChipItem } from './ui/toggle-chip'
 
-type ShareableCanvas = Pick<Canvas, 'id' | 'name' | 'ownerId' | 'linkAccess' | 'memberIds'>
-type SharePatch = Partial<Pick<ShareableCanvas, 'linkAccess' | 'memberIds'>>
+type ShareableCanvas = Pick<
+  Canvas,
+  'id' | 'name' | 'ownerId' | 'linkAccess' | 'memberIds' | 'publishedAt' | 'description' | 'category'
+>
+type SharePatch = Partial<
+  Pick<ShareableCanvas, 'linkAccess' | 'memberIds' | 'publishedAt' | 'description' | 'category'>
+>
 
 /* One sharing surface for the canvas and dashboard. The caller owns canvas
    state; this component reports optimistic access changes back to it. */
@@ -195,7 +207,98 @@ export function ShareModal({
             ⧉ Copy link
           </Button>
         </div>
+        {isOwner && (
+          <CommunityListing canvas={canvas} busy={busy} setBusy={setBusy} setError={setError} onChange={onChange} />
+        )}
       </>
     </Modal>
+  )
+}
+
+/* The gallery is opt-in and owner-only. Listing hands out previews and
+   copies, never access — so it sits apart from the access controls above,
+   with its own switch and its own blurb. */
+function CommunityListing({
+  canvas,
+  busy,
+  setBusy,
+  setError,
+  onChange,
+}: {
+  canvas: ShareableCanvas
+  busy: boolean
+  setBusy: (busy: boolean) => void
+  setError: (error: string | null) => void
+  onChange: (patch: SharePatch) => void
+}) {
+  const published = canvas.publishedAt !== undefined
+  const [description, setDescription] = useState(canvas.description ?? '')
+  const [category, setCategory] = useState<CommunityCategory>(canvas.category ?? 'website')
+  const dirty = published && (description.trim() !== (canvas.description ?? '') || category !== canvas.category)
+
+  async function save(next: boolean) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      if (next) {
+        const listing = await api.publishCanvas(canvas.id, { description: description.trim(), category })
+        if (!published) posthog.capture('canvas_published')
+        onChange(listing)
+      } else {
+        await api.unpublishCanvas(canvas.id)
+        posthog.capture('canvas_unpublished')
+        onChange({ publishedAt: undefined, description: undefined, category: undefined })
+      }
+    } catch (caught) {
+      setError(caught instanceof ApiError ? String(caught.body.error ?? 'publish failed') : 'publish failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3.5 border-t border-line-soft pt-3.5">
+      <label
+        className="flex cursor-pointer items-center gap-2 text-[13px] font-medium text-ink"
+        title="Anyone on doop can preview and copy a listed canvas. The canvas itself stays private."
+      >
+        <Checkbox checked={published} disabled={busy} onChange={(event) => save(event.target.checked)} />
+        Show in the community gallery
+      </label>
+      <p className="mt-1 pl-[26px] text-[12px] leading-snug text-ink-faint">
+        People can preview it and copy it into their own account. Your canvas stays private.
+      </p>
+      {published && (
+        <div className="mt-3 flex flex-col gap-2.5 pl-[26px]">
+          <Textarea
+            rows={2}
+            maxLength={280}
+            className="rounded-[10px] bg-paper text-[13px] focus:ring-0"
+            placeholder="What is this design? One or two lines helps people find it."
+            value={description}
+            disabled={busy}
+            onChange={(event) => setDescription(event.target.value)}
+          />
+          <ToggleChipGroup
+            aria-label="Gallery shelf"
+            className="gap-1.5"
+            value={category}
+            onValueChange={(next) => setCategory(next as CommunityCategory)}
+          >
+            {COMMUNITY_CATEGORIES.map((value) => (
+              <ToggleChipItem key={value} value={value} className="px-2.5 py-1 text-[12px]" disabled={busy}>
+                {COMMUNITY_CATEGORY_LABELS[value]}
+              </ToggleChipItem>
+            ))}
+          </ToggleChipGroup>
+          {dirty && (
+            <Button size="sm" className="self-start" disabled={busy} onClick={() => save(true)}>
+              Update listing
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
   )
 }

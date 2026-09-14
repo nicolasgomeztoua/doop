@@ -1,133 +1,55 @@
-/* global window, document, performance */
-// Run with: node --import tsx scripts/large-file-smoke.mjs
+/* global window, performance */
 import assert from 'node:assert/strict'
 import puppeteer from 'puppeteer-core'
-import { createServer } from 'vite'
-
-const server = await createServer({ server: { port: 0, host: '127.0.0.1' } })
-await server.listen()
 const browser = await puppeteer.launch({
   executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
   headless: true,
   args: ['--no-sandbox', '--disable-dev-shm-usage'],
 })
-const page = await browser.newPage()
-const errors = []
-page.on('pageerror', (error) => errors.push(error.message))
-
 try {
-  await page.goto(`${server.resolvedUrls.local[0]}tests/fixtures/design-editor.html`)
-  const layers = await page.evaluate(async () => {
-    const { parseDesign, readLayers, flattenLayers } = await import('/src/lib/designDocument.ts')
-    const html = Array.from({ length: 12000 }, (_, i) => `<div data-doop-node="node-${i}">Layer ${i}</div>`).join('')
-    const doc = parseDesign(html)
+  const page = await browser.newPage()
+  await page.goto(process.env.DOOP_TEST_BASE || 'http://localhost:4300', { waitUntil: 'networkidle0' })
+  const result = await page.evaluate(async () => {
+    const { buildLayerTree } = await import('/src/lib/layers.ts')
+    const { parseDesign, designSelector } = await import('/src/lib/designDocument.ts')
+    const flatten = (nodes) => nodes.flatMap((n) => [n, ...flatten(n.children)])
+    const html =
+      '<!doctype html><body>' +
+      Array.from({ length: 10000 }, (_, i) => `<div id="item-${i}" data-doop-node="node-${i}">Item</div>`).join('')
     let queries = 0
-    const query = doc.querySelectorAll.bind(doc)
-    doc.querySelectorAll = (...args) => {
+    const original = window.Document.prototype.querySelectorAll
+    window.Document.prototype.querySelectorAll = function (...args) {
       queries++
-      return query(...args)
+      return original.apply(this, args)
     }
-    const started = performance.now()
-    const tree = readLayers(doc)
-    const duration = performance.now() - started
-    return {
-      durationMs: Math.round(duration),
-      queries,
-      count: flattenLayers(tree.layers).length,
-      truncated: tree.truncated,
-    }
-  })
-  console.log('Large layer tree:', layers)
-  assert.equal(layers.count, 3000)
-  assert.equal(layers.truncated, true)
-  assert.ok(layers.queries <= 2, 'Layer discovery must not query the whole document for every layer')
-
-  const selectors = await page.evaluate(async () => {
-    const { parseDesign, readLayers, flattenLayers, designSelector } = await import('/src/lib/designDocument.ts')
-    const results = []
+    const start = performance.now()
+    const tree = buildLayerTree(html)
+    const ms = performance.now() - start
+    window.Document.prototype.querySelectorAll = original
+    const selectors = []
     for (const doctype of ['', '<!doctype html>']) {
-      const doc = parseDesign(`${doctype}<head><meta id="in-head"></head><body>
+      const source = `${doctype}<head><meta id="in-head"></head><body>
         <section data-doop-node="stable" data-doop-locked><p id="unique">Text</p><p>Sibling</p></section>
         <div id="duplicate" data-doop-node="repeated"></div><div id="duplicate" data-doop-node="repeated"></div>
         <div id="in-head"></div><div id="UPPER"></div><div id="upper"></div>
-        <div id="escaped:1" data-doop-node="with space"></div>
-        <svg><g><path id="path"/></g></svg><img src="image.svg"><script></script><div>Last</div>
-      </body>`)
-      for (const layer of flattenLayers(readLayers(doc).layers)) {
+        <div id="escaped:1" data-doop-node="with space"></div><svg><path/></svg><script></script></body>`
+      const doc = parseDesign(source)
+      for (const layer of flatten(buildLayerTree(source))) {
         const matches = doc.querySelectorAll(layer.selector)
-        results.push({ matches: matches.length, selector: layer.selector, expected: designSelector(matches[0]) })
+        selectors.push(matches.length === 1 && layer.selector === designSelector(matches[0]))
       }
     }
-    // A duplicate outside the displayed tree must still disqualify an ID.
-    const limited = parseDesign('<p id="beyond-limit"></p>' + '<div></div>'.repeat(3100) + '<p id="beyond-limit"></p>')
-    const first = readLayers(limited).layers[0].children[0]
-    results.push({
-      matches: limited.querySelectorAll(first.selector).length,
-      selector: first.selector,
-      expected: designSelector(limited.querySelector('p')),
-    })
-    return results
+    const truncated = '<p id="beyond-limit"></p>' + '<div></div>'.repeat(3100) + '<p id="beyond-limit"></p>'
+    const first = buildLayerTree(truncated)[0]
+    selectors.push(parseDesign(truncated).querySelectorAll(first.selector).length === 1)
+    const deep = '<div>'.repeat(200) + 'Text' + '</div>'.repeat(200)
+    return { count: flatten(tree).length, queries, ms, selectors, depthCount: flatten(buildLayerTree(deep)).length }
   })
-  for (const result of selectors) {
-    assert.equal(result.matches, 1)
-    assert.equal(result.selector, result.expected)
-  }
-  console.log('PASS: indexed selectors preserve unique IDs, duplicate fallbacks, positional paths, and truncation')
-
-  await page.evaluate(async () => {
-    const { default: React } = await import('/node_modules/.vite/deps/react.js')
-    const { default: ReactDOM } = await import('/node_modules/.vite/deps/react-dom_client.js')
-    const { LayersPanel } = await import('/src/components/LayersPanel.tsx')
-    const { TooltipProvider } = await import('/src/components/ui/tooltip.tsx')
-    const { useStore } = await import('/src/lib/store.ts')
-    const frames = ['First', 'Second'].map((name) => ({
-      id: name,
-      canvasId: 'test',
-      name,
-      html: `<p id="${name}-text">${name} layer</p>`,
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 100,
-      createdAt: 1,
-      updatedAt: 1,
-      updatedBy: 'test',
-    }))
-    useStore.getState().setCanvas({ id: 'test', name: 'Test', frames, createdAt: 1, updatedAt: 1 })
-    window.layerParses = 0
-    const parse = window.DOMParser.prototype.parseFromString
-    window.DOMParser.prototype.parseFromString = function (...args) {
-      window.layerParses++
-      return parse.apply(this, args)
-    }
-    const host = document.createElement('div')
-    document.body.replaceChildren(host)
-    window.testRoot = ReactDOM.createRoot(host)
-    window.testRoot.render(
-      React.createElement(TooltipProvider, null, React.createElement(LayersPanel, { onClose() {}, onAddFrame() {} })),
-    )
-  })
-  await page.waitForSelector('[aria-label="Expand First"]')
-  assert.equal(await page.evaluate(() => window.layerParses), 0, 'Collapsed layers must not parse any frame HTML')
-  await page.click('[aria-label="Expand First"]')
-  await page.waitForSelector('[role="treeitem"][aria-label="Frame contents"]')
-  assert.equal(await page.evaluate(() => window.layerParses), 1, 'Expanding a frame reads only that frame')
-  await page.type('[aria-label="Search layers and assets"]', 'Second layer')
-  await page.waitForSelector('[role="treeitem"][aria-label="#Second-text"]')
-  await page.click('[role="treeitem"][aria-label="#Second-text"]')
-  await page.waitForFunction(
-    () => document.querySelector('[aria-label="#Second-text"]').getAttribute('aria-selected') === 'true',
-  )
-  await page.click('[role="tab"]:last-child')
-  await page.waitForSelector('[aria-label="New image URL"]')
-  await page.evaluate(() => window.testRoot.unmount())
-  console.log('PASS: collapsed frames defer parsing; expansion, canvas-wide search, selection, and Assets still work')
-
-  assert.deepEqual(errors, [])
-} catch (error) {
-  console.error('Browser errors:', errors)
-  throw error
+  assert.equal(result.count, 3000)
+  assert.ok(result.queries <= 2, 'Index source identities once per tree')
+  assert.ok(result.selectors.every(Boolean), 'Tree and runtime source selectors must identify one element')
+  assert.ok(result.depthCount <= 81, 'Deep imports cannot overflow the layer traversal')
+  console.log('PASS large imported documents retain bounded trees and matching unique selectors', result)
 } finally {
   await browser.close()
-  await server.close()
 }

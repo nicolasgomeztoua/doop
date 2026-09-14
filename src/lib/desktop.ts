@@ -7,28 +7,19 @@
 
 import { create } from 'zustand'
 import { navigate } from '../App'
+import { isDesktopShell } from './shell'
 
 export type CanvasTab = { id: string; name: string }
 
 type ShellWindow = Window & {
-  __DOOP_DESKTOP__?: unknown
-  __TAURI__?: { opener?: { openUrl?: (url: string) => Promise<void> } }
+  __TAURI__?: {
+    opener?: { openUrl?: (url: string) => Promise<void> }
+    event?: { listen?: (name: string, handler: () => void) => Promise<() => void> }
+    window?: { getCurrentWindow?: () => { close: () => Promise<void> } }
+  }
 }
 
 const shellWindow = window as ShellWindow
-
-export function isDesktopShell(): boolean {
-  return typeof shellWindow.__DOOP_DESKTOP__ === 'string'
-}
-
-/** The overlay title bar (traffic lights floating over the page) arrived
- *  with shell 0.1.2; older shells keep a native title bar and need no inset. */
-export function hasInsetTrafficLights(): boolean {
-  const v = shellWindow.__DOOP_DESKTOP__
-  if (typeof v !== 'string') return false
-  const [maj = 0, min = 0, pat = 0] = v.split('.').map((n) => parseInt(n, 10) || 0)
-  return maj > 0 || min > 1 || (min === 1 && pat >= 2)
-}
 
 /* ---------- tab strip state ---------- */
 
@@ -136,6 +127,20 @@ export function closeAllTabs() {
   navigate('/')
 }
 
+/** Cmd/Ctrl+W. On a canvas it closes that tab. Anywhere else (Home,
+ *  Settings) there is no tab to close, so the window closes as it would in a
+ *  browser whose last tab is closed — which is what the shell did for every
+ *  Cmd+W before its menu said "Close Tab". */
+export function closeActiveTab() {
+  const path = location.pathname
+  const id = path.match(/^\/c\/([^/]+)/)?.[1]
+  if (id) {
+    closeTab(id, path)
+    return
+  }
+  shellWindow.__TAURI__?.window?.getCurrentWindow?.().close().catch(console.error)
+}
+
 /* ---------- external links ---------- */
 
 /** Hand a URL to the system browser via the shell's opener IPC. False on
@@ -152,6 +157,15 @@ export function openExternal(url: string): boolean {
  *  browser instead. Runs once from main.tsx; no-op outside the shell. */
 export function initDesktopShell() {
   if (!isDesktopShell()) return
+  /* Cmd+W: on macOS the shell's menu owns the shortcut (main.rs) and relays
+     it as an event — the page never sees the keystroke. Windows has no menu
+     bar, so Ctrl+W arrives as a plain keydown. Both close the active tab. */
+  shellWindow.__TAURI__?.event?.listen?.('close-tab', closeActiveTab).catch(console.error)
+  document.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() !== 'w' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return
+    e.preventDefault()
+    closeActiveTab()
+  })
   document.addEventListener(
     'click',
     (e) => {

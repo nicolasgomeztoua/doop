@@ -8,7 +8,17 @@ import { Logo } from '../components/Logo'
 import { timeAgo } from '../lib/time'
 import { AgentIcon } from '../components/AgentIcon'
 import { ShareModal } from '../components/ShareModal'
-import { AccountMenu, ConnectCard, IconGrid, IconList, IconShare, IconUser } from '../components/DashShell'
+import {
+  AccountMenu,
+  ConnectCard,
+  IconAutomations,
+  IconCommunity,
+  IconIntegrations,
+  IconGrid,
+  IconList,
+  IconShare,
+  IconUser,
+} from '../components/DashShell'
 import { posthog } from '../lib/posthog'
 import { closeTab, openCanvasTab, pruneTabs } from '../lib/desktop'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
@@ -27,7 +37,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu'
-import { CopyIcon, MoreHorizontalIcon, ShareIcon, TrashIcon } from '../components/ui/icons'
+import { CopyIcon, MoreHorizontalIcon, PlusIcon, SearchIcon, ShareIcon, TrashIcon } from '../components/ui/icons'
 import { ConfirmDialog } from '../components/ui/alert-dialog'
 import { Toast } from '../components/ui/toast'
 import {
@@ -49,9 +59,12 @@ const LIVE_WINDOW = 5 * 60 * 1000
 type Scope = 'all' | 'mine' | 'shared'
 
 /* a canvas tile: the Card surface, made clickable */
+/* Canvas tiles: the raised Card surface (frosted, squircle corners, no drawn
+   border — the edge is the elevation ring) with the lift on hover. */
 const cardCls = cn(
-  cardVariants(),
-  'overflow-hidden p-0 text-left transition-[translate,box-shadow,border-color] duration-150 hover:-translate-y-[3px] hover:border-ink-faint hover:shadow-pop',
+  cardVariants({ tone: 'raised' }),
+  'relative z-[2] transform-gpu overflow-hidden rounded-[14px] p-0 text-left text-ink',
+  'bg-[color-mix(in_srgb,var(--surface)_72%,transparent)] backdrop-blur-[6px]',
 )
 
 export function Home() {
@@ -214,6 +227,13 @@ export function Home() {
             on={scope === 'shared'}
             go={() => setScope('shared')}
           />
+          <NavItem icon={<IconAutomations />} label="Automations" on={false} go={() => navigate('/automations')} />
+          <NavItem icon={<IconIntegrations />} label="Integrations" on={false} go={() => navigate('/integrations')} />
+        </nav>
+
+        <DashSectionLabel>Explore</DashSectionLabel>
+        <nav className="flex flex-col gap-0.5">
+          <NavItem icon={<IconCommunity />} label="Community" on={false} go={() => navigate('/community')} />
         </nav>
 
         {agents.length > 0 && (
@@ -288,10 +308,7 @@ export function Home() {
             <Logo className="size-7" /> Doop
           </Button>
           <label className="order-2 flex h-10 max-w-none flex-1 basis-full items-center gap-[9px] rounded-[10px] border border-line bg-surface px-[11px] text-ink-faint focus-within:border-ink-faint md:order-none md:h-[34px] md:max-w-[400px] md:basis-auto">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.2-3.2" />
-            </svg>
+            <SearchIcon width={14} height={14} aria-hidden />
             <Input
               ref={searchRef}
               value={query}
@@ -344,13 +361,18 @@ export function Home() {
             </SegmentedIcons>
           </div>
 
-          <Tabs value={scope} onValueChange={(next) => setScope(next as Scope)} className="mt-4 flex md:hidden">
-            <TabsList className="h-10 w-full border border-line bg-surface p-1 shadow-card">
-              <TabsTrigger value="all">All · {counts.all}</TabsTrigger>
-              <TabsTrigger value="mine">Mine · {counts.mine}</TabsTrigger>
-              <TabsTrigger value="shared">Shared · {counts.shared}</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <div className="mt-4 flex items-center gap-2 md:hidden">
+            <Tabs value={scope} onValueChange={(next) => setScope(next as Scope)} className="flex min-w-0 flex-1">
+              <TabsList className="h-10 w-full border border-line bg-surface p-1 shadow-card">
+                <TabsTrigger value="all">All · {counts.all}</TabsTrigger>
+                <TabsTrigger value="mine">Mine · {counts.mine}</TabsTrigger>
+                <TabsTrigger value="shared">Shared · {counts.shared}</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <Button variant="ghost" className="h-10 flex-none gap-1.5" onClick={() => navigate('/community')}>
+              <IconCommunity /> Community
+            </Button>
+          </div>
 
           {empty ? (
             <Card className="mt-7 max-w-[560px] rounded-[18px] px-5 pb-6 pt-5 sm:px-7 sm:pb-7 sm:pt-[26px]">
@@ -383,14 +405,22 @@ export function Home() {
               ) : view === 'grid' ? (
                 <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-3.5 xs:grid-cols-[repeat(auto-fill,minmax(214px,1fr))] md:gap-4">
                   {canvases !== null && (
-                    <Button
-                      variant="ghost"
-                      className="min-h-16 flex-col justify-center gap-1.5 overflow-hidden rounded-[14px] border-[1.5px] border-dashed p-0 text-ink-faint hover:border-brand hover:bg-brand/[0.04] hover:text-accent-ink xs:min-h-full"
+                    <button
+                      className={cn(
+                        cardCls,
+                        'flex min-h-16 flex-col items-center justify-center gap-3.5 px-4 py-6 text-center text-ink hover:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand xs:min-h-full',
+                      )}
+                      aria-label="Create a new canvas"
                       onClick={createCanvas}
                     >
-                      <span className="font-display text-[34px] font-bold leading-none">+</span>
-                      <span className="text-[13px] font-semibold">New canvas</span>
-                    </Button>
+                      <span className="grid size-8 place-items-center rounded-lg bg-brand text-white">
+                        <PlusIcon width={20} height={20} strokeWidth={1.8} />
+                      </span>
+                      <span>
+                        <span className="block font-display text-[13.5px] font-semibold">New canvas</span>
+                        <span className="mt-[5px] block text-[11.5px] text-ink-soft">Start from scratch</span>
+                      </span>
+                    </button>
                   )}
                   {canvases === null &&
                     [0, 1, 2, 3].map((i) => (
@@ -542,7 +572,7 @@ function AgentStack({ canvas }: { canvas: CanvasMeta }) {
       {agents.map((a) => (
         <i
           key={a.name}
-          className="grid size-5 place-items-center rounded-[6px] border border-line bg-surface shadow-[0_1px_3px_rgba(18,18,23,0.1)]"
+          className="grid size-5 place-items-center rounded-[7px] corner-squircle bg-[color-mix(in_srgb,var(--surface)_72%,transparent)] shadow-elevation-1 backdrop-blur-[6px]"
           style={{ color: colorFor(a.name) }}
           title={a.name}
         >
@@ -585,7 +615,7 @@ function Meta({ canvas: c, onClaim }: { canvas: CanvasMeta; onClaim: () => void 
   )
 }
 
-function NavItem({
+export function NavItem({
   icon,
   label,
   count,
@@ -594,7 +624,7 @@ function NavItem({
 }: {
   icon: React.ReactNode
   label: string
-  count: number
+  count?: number
   on: boolean
   go: () => void
 }) {
@@ -633,16 +663,18 @@ function CanvasActions({
           type="button"
           aria-label={`Actions for ${canvas.name}`}
           className={cn(
-            'grid cursor-pointer place-items-center rounded-full transition-[opacity,background,color] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand',
+            'grid cursor-pointer place-items-center transition-[opacity,box-shadow,background,color] duration-normal ease-out-quad focus-visible:outline-none',
             compact
-              ? 'size-8 flex-none text-ink-faint hover:bg-paper-deep hover:text-ink'
-              : 'absolute right-2 top-2 size-10 bg-ink/75 text-white opacity-100 hover:bg-ink md:size-7 md:opacity-0 md:group-hover:opacity-100 md:data-[state=open]:opacity-100',
+              ? 'size-8 flex-none rounded-full text-ink-faint hover:bg-paper-deep hover:text-ink focus-visible:ring-2 focus-visible:ring-brand'
+              : /* the frosted chip: surface at 72% over the preview, blurred, edged by the
+                   elevation ring rather than a border; revealed by the tile's hover */
+                'absolute right-2 top-2 size-9 rounded-[12px] corner-squircle bg-[color-mix(in_srgb,var(--surface)_72%,transparent)] text-ink shadow-elevation-1 backdrop-blur-[6px] hover:shadow-elevation-1-hover focus-visible:shadow-elevation-1-focus md:size-[30px] md:rounded-[10px] md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100 md:data-[state=open]:opacity-100',
           )}
         >
           <MoreHorizontalIcon className="size-4" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-[190px]">
+      <DropdownMenuContent className="w-[190px] rounded-[14px] corner-squircle border-0 shadow-elevation-2">
         <DropdownMenuItem onSelect={onShare}>
           <ShareIcon className="size-4" /> Share
         </DropdownMenuItem>

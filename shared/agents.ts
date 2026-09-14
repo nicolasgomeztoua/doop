@@ -4,14 +4,16 @@
  *
  * A role IS an agent identity: `name` is what shows up in presence, in the
  * activity feed and in @mentions, and colorFor(name) gives it its colour, so
- * two roles never look like the same worker on the canvas.
+ * two roles never look like the same worker on the canvas. `color` is the
+ * role's crew colour, used only to tint its Doop mark.
  */
 
 export interface AgentRole {
   id: string
   /** the identity this agent works under — presence, tasks, @mentions */
   name: string
-  emoji: string
+  /** the crew colour from doop.design's team section — tints the role's mark */
+  color: string
   /** one line for the picker */
   blurb: string
   /** the agent's specialty, injected into its system prompt */
@@ -27,7 +29,7 @@ export const AGENT_ROLES: AgentRole[] = [
   {
     id: 'doop',
     name: 'Doop',
-    emoji: '✦',
+    color: '#E8432E',
     blurb: 'Generalist designer — makes the thing',
     brief:
       'You are the generalist designer. You originate work: new frames, layouts, full redesigns, and any change that does not belong to a specialist. Build the deliverable the card asks for, complete and presentable.',
@@ -36,7 +38,7 @@ export const AGENT_ROLES: AgentRole[] = [
   {
     id: 'ux',
     name: 'UX Lead',
-    emoji: '⌘',
+    color: '#2743EE',
     blurb: 'Flow, hierarchy, states, affordances',
     brief:
       'You are the UX lead. Judge the design as an interface someone has to use: is the primary action obvious, is the reading order the decision order, are labels unambiguous, are empty/loading/error/disabled states accounted for, are targets and affordances legible as interactive? Fix structure and hierarchy — do not restyle for taste.',
@@ -45,7 +47,7 @@ export const AGENT_ROLES: AgentRole[] = [
   {
     id: 'copy',
     name: 'Copywriter',
-    emoji: '✎',
+    color: '#8B5CF6',
     blurb: 'Headlines, microcopy, labels, CTAs',
     brief:
       'You are the copywriter. Own every word in the frame: headline, subhead, body, labels, button text, empty states, error messages. Make it specific, human and short — cut filler, kill vague verbs, prefer concrete nouns. Keep the layout intact; if a rewrite changes the line count, keep it inside the existing box.',
@@ -54,7 +56,7 @@ export const AGENT_ROLES: AgentRole[] = [
   {
     id: 'brand',
     name: 'Brand Compliance',
-    emoji: '◈',
+    color: '#D98E04',
     blurb: 'Palette, type, logo, tone of voice',
     brief:
       'You are brand compliance. Check the frame against the brand as it is established on this canvas — take the dominant palette, type family, scale, radii and tone from the other frames and any frame that reads as a brand or style guide. Flag and fix off-palette colours, stray fonts, inconsistent radii or shadows, misused logo treatment, and off-tone voice. Do not redesign; bring the frame into line.',
@@ -64,7 +66,7 @@ export const AGENT_ROLES: AgentRole[] = [
   {
     id: 'a11y',
     name: 'Accessibility',
-    emoji: '◎',
+    color: '#0E8FA0',
     blurb: 'Contrast, semantics, focus, target size',
     brief:
       'You are the accessibility reviewer. Check contrast against WCAG AA (4.5:1 body, 3:1 large text and meaningful UI edges), semantic structure (one h1, ordered headings, landmarks, real buttons and labels over styled divs), alt text on meaningful images, visible focus styles, and touch targets of at least 44px. Fix what fails without changing the design intent.',
@@ -74,7 +76,7 @@ export const AGENT_ROLES: AgentRole[] = [
   {
     id: 'polish',
     name: 'Visual Polish',
-    emoji: '✧',
+    color: '#0E9F6E',
     blurb: 'Spacing rhythm, alignment, final detail',
     brief:
       'You are the polish pass, and you go last. Tighten optical alignment, enforce one spacing scale, even out the type ramp, balance weights and densities, fix ragged edges and orphaned words, and make sure nothing overflows or collides at the frame size. Small, surgical changes only — never restructure.',

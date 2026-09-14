@@ -242,7 +242,7 @@ describe('design sync ingest', () => {
       })
     expect((await post({ page: 'not-rooted', html: '<p>x</p>' })).status).toBe(400)
     expect((await post({ page: '/x' })).status).toBe(400)
-    expect((await post({ page: '/big', html: '<p>' + 'x'.repeat(2_600_000) + '</p>' })).status).toBe(413)
+    expect((await post({ page: '/big', html: '<p>' + 'x'.repeat(3_100_000) + '</p>' })).status).toBe(413)
   })
 
   it('link-edit visitors can edit frames but cannot touch sync keys', async () => {
@@ -347,7 +347,7 @@ describe('design sync freeze', () => {
 
     const got = await (await owner.get(`/api/canvases/${canvas.id}`)).json()
     expect(got.frames).toHaveLength(1)
-    expect(got.frames[0].html).toContain('v1') // the rewrite was refused
-    expect(got.frames[0].html).not.toContain('v2')
+    expect(got.frames[0].html).toContain('<h1>v1</h1>') // the rewrite was refused
+    expect(got.frames[0].html).not.toContain('<h1>v2</h1>')
   })
 })

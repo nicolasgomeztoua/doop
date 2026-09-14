@@ -15,8 +15,8 @@ export function readShadow(value: string): ShadowPaint | null {
   const colors = tokens.filter((token) => token !== 'inset' && !lengths.includes(token))
   if (lengths.length < 2 || lengths.length > 4 || colors.length > 1) return null
   return {
-    x: lengths[0],
-    y: lengths[1],
+    x: lengths[0]!,
+    y: lengths[1]!,
     blur: lengths[2] || '0px',
     spread: lengths[3] || '0px',
     color: colors[0] || 'currentColor',
@@ -37,14 +37,14 @@ export function readGradient(value: string): GradientPaint | null {
   const match = value.match(/^(linear|radial|conic)-gradient\((.*)\)$/s)
   if (!match) return null
   const type = match[1] as GradientPaint['type']
-  const parts = splitCssList(match[2])
-  const direction = /^(?:-?[\d.]+(?:deg|turn|rad)|to\s|circle\b|ellipse\b|at\s|from\s)/.test(parts[0])
+  const parts = splitCssList(match[2] ?? '')
+  const direction = /^(?:-?[\d.]+(?:deg|turn|rad)|to\s|circle\b|ellipse\b|at\s|from\s)/.test(parts[0] ?? '')
     ? parts.shift()!
     : ''
   if (parts.length < 2) return null
   const stops = parts.map((part) => {
     const stop = part.match(/^(.*)\s+(-?(?:\d+\.?\d*|\.\d+)(?:%|deg))$/)
-    return stop ? { color: stop[1], position: stop[2] } : { color: part, position: '' }
+    return stop ? { color: stop[1] ?? '', position: stop[2] ?? '' } : { color: part, position: '' }
   })
   // Mixed implicit/explicit stops and interpolation hints remain editable CSS.
   if (stops.some((stop) => stop.position) && stops.some((stop) => !stop.position)) return null

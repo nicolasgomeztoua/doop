@@ -55,6 +55,68 @@ describe('extractHtml', () => {
     expect(extractHtml([{ type: 'text', text: '<!doctype html><p>x</p>' }]).height).toBe(900)
     expect(() => extractHtml([{ type: 'text', text: 'sorry, no' }])).toThrow(/no HTML/)
   })
+
+  it('accepts a generic-language fence (not just ```html)', () => {
+    const { html } = extractHtml([{ type: 'text', text: '```xml\n<!doctype html><p>x</p>\n```' }])
+    expect(html.startsWith('<!doctype html>')).toBe(true)
+  })
+
+  it('accepts an unclosed fence, reading past the truncated marker', () => {
+    const { html } = extractHtml([{ type: 'text', text: '```html\n<!doctype html><p>x</p>' }])
+    expect(html.startsWith('<!doctype html>')).toBe(true)
+  })
+
+  it('adds a doctype to an <html> document that is missing one', () => {
+    const { html, height } = extractHtml([
+      { type: 'text', text: '<html><body>x</body></html>\n<!-- doop-height: 500 -->' },
+    ])
+    expect(html.startsWith('<!doctype html>\n<html>')).toBe(true)
+    expect(height).toBe(500)
+  })
+
+  it('wraps a component fragment (no <html>, no doctype) into a minimal document', () => {
+    const { html, height } = extractHtml([
+      { type: 'text', text: '<div class="card">x</div>\n<!-- doop-height: 300 -->' },
+    ])
+    expect(html.startsWith('<!doctype html>')).toBe(true)
+    expect(html).toContain('<div class="card">x</div>')
+    expect(height).toBe(480) // clamped up from 300
+  })
+
+  it('wraps a bare <style> fragment', () => {
+    const { html } = extractHtml([{ type: 'text', text: '<style>.a { color: red; }</style>' }])
+    expect(html.startsWith('<!doctype html>')).toBe(true)
+    expect(html).toContain('<style>.a { color: red; }</style>')
+  })
+
+  it('wraps any element as a fragment, not just a fixed list', () => {
+    const { html } = extractHtml([{ type: 'text', text: '<button class="primary">Save</button>' }])
+    expect(html).toContain('<body>\n<button class="primary">Save</button>\n</body>')
+  })
+
+  it('gives a wrapped fragment a <head> so the frame wrapper has somewhere to inject', () => {
+    const { html } = extractHtml([{ type: 'text', text: '<div>x</div>' }])
+    expect(html).toContain('<head></head>')
+  })
+
+  it('starts a fragment at the first line that begins with a tag, skipping tags mentioned in prose', () => {
+    const { html } = extractHtml([
+      { type: 'text', text: 'I used a <div> wrapper for the layout:\n\n  <section class="card">real</section>' },
+    ])
+    expect(html).toContain('<body>\n<section class="card">real</section>\n</body>')
+    expect(html).not.toContain('wrapper for the layout')
+  })
+
+  it('prefers an explicit doctype over a fragment tag that appears earlier in the same text', () => {
+    const { html } = extractHtml([
+      { type: 'text', text: 'Explanation with a <div> mention.\n<!doctype html><main>real doc</main>' },
+    ])
+    expect(html.startsWith('<!doctype html><main>real doc</main>')).toBe(true)
+  })
+
+  it('still rejects prose that only contains tag-shaped words, not real tags', () => {
+    expect(() => extractHtml([{ type: 'text', text: 'no divs or mains here, sorry' }])).toThrow(/no HTML/)
+  })
 })
 
 describe('treeExcerpt', () => {
