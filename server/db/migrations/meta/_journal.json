@@ -71,6 +71,34 @@
       "when": 1788474725138,
       "tag": "0009_repo_cards",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788992898395,
+      "tag": "0010_community",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788994279174,
+      "tag": "0011_backgrounds",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789160600561,
+      "tag": "0012_automations",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789165950163,
+      "tag": "0013_integrations_unique",
+      "breakpoints": true
     }
   ]
 }

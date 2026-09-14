@@ -6,23 +6,22 @@ import { presentationScale, presentationZoomLimits, zoomedScroll, type Presentat
 import { Button } from './ui/button'
 import { Modal, ModalTitle } from './ui/modal'
 
-export function FramePresentation() {
-  const frame = useStore((s) => s.canvas?.frames.find((f) => f.id === s.presentedFrameId))
+export function PresentMode({ frameId, onClose }: { frameId: string; onClose: () => void }) {
+  const frame = useStore((s) => s.canvas?.frames.find((f) => f.id === frameId))
   return frame ? (
     <Modal
       size="fullscreen"
-      onClose={() => useStore.getState().presentFrame(null)}
+      onClose={onClose}
       aria-describedby={undefined}
       onKeyDown={(event) => event.stopPropagation()}
       onPaste={(event) => event.stopPropagation()}
     >
-      <Presentation key={frame.id} frame={frame} />
+      <Presentation key={frame.id} frame={frame} onClose={onClose} />
     </Modal>
   ) : null
 }
 
-function Presentation({ frame }: { frame: Frame }) {
-  const presentFrame = useStore((s) => s.presentFrame)
+function Presentation({ frame, onClose }: { frame: Frame; onClose: () => void }) {
   const surface = useRef<HTMLDivElement>(null)
   const stage = useRef<HTMLDivElement>(null)
   const iframe = useRef<HTMLIFrameElement>(null)
@@ -37,7 +36,7 @@ function Presentation({ frame }: { frame: Frame }) {
   const scale = presentationScale(view.mode, view.zoom, size, frame)
   const limits = presentationZoomLimits(size, frame)
   const [fullscreen, setFullscreen] = useState(false)
-  const close = () => presentFrame(null)
+  const close = () => onClose()
 
   /* Measure the available stage, including when browser fullscreen or device
      rotation changes it. The iframe keeps its design viewport at every size. */
@@ -102,11 +101,11 @@ function Presentation({ frame }: { frame: Frame }) {
       if (event.source !== iframe.current?.contentWindow) return
       if (event.data?.type === 'doop:frame-ready') setReady(true)
       /* Keyboard events in a sandboxed iframe do not bubble to the dialog. */
-      if (event.data?.type === 'doop:frame-esc') presentFrame(null)
+      if (event.data?.type === 'doop:esc') onClose()
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [presentFrame])
+  }, [onClose])
 
   useEffect(() => {
     if (ready) iframe.current?.contentWindow?.postMessage({ type: 'doop:html', html: frame.html }, '*')
@@ -120,7 +119,7 @@ function Presentation({ frame }: { frame: Frame }) {
       setFullscreen(active)
       /* The browser consumes Escape in native fullscreen. Its exit event
          must close the presentation too, so one Escape always returns. */
-      if (entered && !active && !leavingFullscreen.current) presentFrame(null)
+      if (entered && !active && !leavingFullscreen.current) onClose()
       leavingFullscreen.current = false
       entered = active
     }
@@ -129,7 +128,7 @@ function Presentation({ frame }: { frame: Frame }) {
       document.removeEventListener('fullscreenchange', onFullscreenChange)
       if (document.fullscreenElement === el) void document.exitFullscreen().catch(() => {})
     }
-  }, [presentFrame])
+  }, [onClose])
 
   return (
     <div

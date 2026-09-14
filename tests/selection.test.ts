@@ -133,7 +133,7 @@ describe('review follow-ups', () => {
     useStore.getState().patchFrameLocal('a', { html: 'remote edit' })
     await history.undo()
     expect(api.updateFrame).not.toHaveBeenCalled()
-    expect(useStore.getState().canvas!.frames[0].html).toBe('remote edit')
+    expect(useStore.getState().canvas!.frames[0]!.html).toBe('remote edit')
   })
   it('deleting the primary frame promotes the last surviving member', () => {
     useStore.getState().selectMany(['a', 'b', 'c'])
@@ -222,23 +222,17 @@ it('element export targets one frame and resets when whole frames are exported',
   s.closeExport()
 })
 
-it('the main export command follows element selection, while frame actions target frames', () => {
+it('element selection and captured export geometry are independent', () => {
   const s = useStore.getState()
   const element = { label: 'h1', rect: { x: 10, y: 20, width: 80, height: 30 } }
   s.select('a')
-  s.setSelectedElement('a', element)
-  s.openExport()
-  expect(useStore.getState().exportElement).toMatchObject(element)
+  s.pickElement({ frameId: 'a', selector: '#heading' })
+  s.openElementExport('a', element)
+  expect(useStore.getState().exportElement).toEqual(element)
+  s.pickElement({ frameId: 'a', selector: '#other' })
+  expect(useStore.getState().exportElement).toEqual(element)
   s.openExport('a')
   expect(useStore.getState().exportElement).toBeNull()
-  s.toggleSelect('b')
-  s.openExport()
-  expect(useStore.getState().exportFrameIds).toEqual(['a', 'b'])
-  expect(useStore.getState().exportElement).toBeNull()
-  s.setSelectedElement('a', element)
-  expect(useStore.getState().selectedElement).toBeNull()
-  s.select('a')
-  s.setSelectedElement('a', element)
   s.select(null)
   expect(useStore.getState().selectedElement).toBeNull()
   s.closeExport()

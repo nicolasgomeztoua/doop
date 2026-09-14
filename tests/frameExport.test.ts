@@ -51,8 +51,8 @@ describe('export downloads', () => {
     expect(result.name).toBe('Frame.png')
     expect(result.blob.type).toBe('image/png')
     expect(await result.blob.text()).toBe('image')
-    expect(fetcher.mock.calls[0][0]).toBe('/i/a.png?scale=2&quality=90')
-    expect(fetcher.mock.calls[0][1].cache).toBe('no-store')
+    expect(fetcher.mock.calls[0]![0]).toBe('/i/a.png?scale=2&quality=90')
+    expect(fetcher.mock.calls[0]![1].cache).toBe('no-store')
   })
   it('puts every selected frame in a valid ZIP with unique names', async () => {
     vi.stubGlobal(
@@ -161,7 +161,7 @@ describe('element export', () => {
       new AbortController().signal,
     )
     expect(result.blob.type).toBe('image/png')
-    const query = new URL(fetcher.mock.calls[0][0], 'https://example.test').searchParams
+    const query = new URL(fetcher.mock.calls[0]![0], 'https://example.test').searchParams
     expect(query.get('crop')).toBe('10,20,50,30')
     expect(query.get('scale')).toBe('2')
   })

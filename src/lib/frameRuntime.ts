@@ -17,7 +17,6 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     vSheet.replaceSync('html,body{overscroll-behavior-x:none}')
     document.adoptedStyleSheets = document.adoptedStyleSheets.concat(vSheet)
   } catch (e) {}
-
   function syncAttrs(from, to) {
     for (var i = from.attributes.length - 1; i >= 0; i--) {
       var name = from.attributes[i].name
@@ -83,11 +82,18 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
   }
 
+  var renderedHtml = null
+  var sourceDocument = null
   function render(html) {
     var doc
     try {
       doc = new DOMParser().parseFromString(html, 'text/html')
+      sourceDocument = doc
+      renderedHtml = html
       syncAttrs(document.documentElement, doc.documentElement)
+      /* the incoming html carries no root style, so the sync drops our
+         crisp-render zoom — put it back before the page reflows */
+      if (curZoom !== 1) document.documentElement.style.zoom = String(curZoom)
       morphChildren(document.head, doc.head)
       morphChildren(document.body, doc.body)
       activateScripts()
@@ -145,16 +151,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   /* tell the parent which element is selected for editing, so it can anchor
      the element toolbar (comment etc.) to it */
   function activeInfo() {
-    if (!activeEl) return null
-    var snippet = activeEl.outerHTML || ''
-    if (snippet.length > 400) snippet = snippet.slice(0, 397) + '...'
-    return {
-      selector: cssPath(activeEl),
-      tag: activeEl.tagName.toLowerCase(),
-      text: (activeEl.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
-      snippet: snippet,
-      rect: designRect(activeEl),
-    }
+    return activeEl ? hitInfo(activeEl) : null
   }
 
   function postActive() {
@@ -258,11 +255,15 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     editTimer = setTimeout(postEdited, 400)
   })
 
+  /* Escape pressed with focus inside the frame: the parent never sees the
+     key event itself, so relay it (present mode closes on it) */
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Escape') parent.postMessage({ type: 'doop:frame-esc' }, '*')
-    if (editing && ev.key === 'Escape') {
+    if (ev.key !== 'Escape') return
+    if (editing) {
       setEdit(false)
       parent.postMessage({ type: 'doop:edit-esc' }, '*')
+    } else {
+      parent.postMessage({ type: 'doop:esc' }, '*')
     }
   })
 
@@ -274,15 +275,18 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   var curZoom = 1
 
   function cssPath(el) {
+    var node = el.getAttribute('data-doop-node')
+    var attr = node ? '[data-doop-node="' + CSS.escape(node) + '"]' : null
+    if (attr && (sourceDocument || document).querySelectorAll(attr).length === 1) return attr
+    if (el.id && (sourceDocument || document).querySelectorAll('#' + CSS.escape(el.id)).length === 1) return '#' + CSS.escape(el.id)
+    if (el === document.body) return 'body'
     var parts = []
     while (el && el.nodeType === 1 && el !== document.documentElement) {
-      if (el.id) { parts.unshift('#' + CSS.escape(el.id)); break }
-      var tag = el.tagName.toLowerCase()
       var nth = 1
-      for (var s = el.previousElementSibling; s; s = s.previousElementSibling) {
-        if (s.tagName === el.tagName) nth++
+      for (var sibling = el.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        if (sibling.tagName === el.tagName) nth++
       }
-      parts.unshift(tag + ':nth-of-type(' + nth + ')')
+      parts.unshift(el.tagName.toLowerCase() + ':nth-of-type(' + nth + ')')
       el = el.parentElement
     }
     return parts.join(' > ')
@@ -293,9 +297,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return { x: r.left / curZoom, y: r.top / curZoom, width: r.width / curZoom, height: r.height / curZoom }
   }
 
-  function probe(x, y) {
-    var el = document.elementFromPoint(x * curZoom, y * curZoom)
-    if (!el || el === document.documentElement || el === document.body) return null
+  function hitInfo(el) {
     var snippet = el.outerHTML || ''
     if (snippet.length > 400) snippet = snippet.slice(0, 397) + '...'
     return {
@@ -305,6 +307,20 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       snippet: snippet,
       rect: designRect(el),
     }
+  }
+
+  function probe(x, y) {
+    var el = document.elementFromPoint(x * curZoom, y * curZoom)
+    if (!el || el === document.documentElement || el === document.body) return null
+    return hitInfo(el)
+  }
+
+  /* the Layers panel selects by selector rather than by point */
+  function describe(selector) {
+    var el = null
+    try { el = selector ? document.querySelector(selector) : null } catch (e) { /* bad selector */ }
+    if (!el || el === document.documentElement || el === document.body) return null
+    return hitInfo(el)
   }
 
   /* hover inspection: like probe but fired on every (throttled) pointer move,
@@ -333,13 +349,116 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return html
   }
 
+  /* ---- element properties (the Design panel) ----
+     The panel cannot read computed styles across the sandbox, so it asks for
+     a summary of one element and writes changes back as inline styles; the
+     edited document then goes to the parent through the usual save path. */
+  function px(v) {
+    var n = parseFloat(v)
+    return isNaN(n) ? null : Math.round(n * 100) / 100
+  }
+
+  function inspect(selector) {
+    var el = null
+    try { el = selector ? document.querySelector(selector) : null } catch (e) { /* bad selector */ }
+    if (!el || el === document.documentElement) return null
+    var cs = getComputedStyle(el)
+    var parentEl = el.parentElement
+    var pcs = parentEl ? getComputedStyle(parentEl) : null
+    var siblings = parentEl ? parentEl.children : [el]
+    var index = 0
+    for (var i = 0; i < siblings.length; i++) if (siblings[i] === el) index = i + 1
+    var inline = {}
+    for (var j = 0; j < el.style.length; j++) {
+      var name = el.style[j]
+      inline[name] = el.style.getPropertyValue(name)
+    }
+    var classes = (el.getAttribute('class') || '').trim().split(/[ ]+/).filter(Boolean)
+    var text = ''
+    for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3) text += n.nodeValue
+    var sides = ['Top', 'Right', 'Bottom', 'Left']
+    var drawn = 'Top'
+    for (var b = 0; b < sides.length; b++) {
+      if (px(cs['border' + sides[b] + 'Width']) > 0 && cs['border' + sides[b] + 'Style'] !== 'none') { drawn = sides[b]; break }
+    }
+    var styles = {}
+    var keys = ${JSON.stringify(DESIGN_PROPERTY_KEYS)}
+    for (var ki = 0; ki < keys.length; ki++) styles[keys[ki]] = cs.getPropertyValue(keys[ki])
+    return {
+      styles: styles,
+      hidden: el.hasAttribute('hidden') || cs.display === 'none' || cs.visibility === 'hidden',
+      tag: el.tagName.toLowerCase(),
+      id: el.id || '',
+      classes: classes,
+      parent: parentEl && parentEl !== document.documentElement
+        ? { tag: parentEl.tagName.toLowerCase(), id: parentEl.id || '', className: (parentEl.getAttribute('class') || '').trim().split(/[ ]+/)[0] || '', display: pcs.display, flexDirection: pcs.flexDirection }
+        : null,
+      index: index,
+      count: siblings.length,
+      inline: inline,
+      hasText: text.replace(/\\s+/g, '') !== '',
+      rect: designRect(el),
+      position: cs.position,
+      display: cs.display,
+      flexDirection: cs.flexDirection,
+      width: px(cs.width),
+      height: px(cs.height),
+      minWidth: cs.minWidth,
+      rowGap: px(cs.rowGap),
+      columnGap: px(cs.columnGap),
+      padding: [px(cs.paddingTop), px(cs.paddingRight), px(cs.paddingBottom), px(cs.paddingLeft)],
+      opacity: px(cs.opacity),
+      visibility: cs.visibility,
+      backgroundColor: cs.backgroundColor,
+      /* rounded: the crisp-render zoom snaps hairlines to device pixels */
+      borderWidths: [
+        Math.round(px(cs.borderTopWidth)),
+        Math.round(px(cs.borderRightWidth)),
+        Math.round(px(cs.borderBottomWidth)),
+        Math.round(px(cs.borderLeftWidth)),
+      ],
+      borderStyle: cs['border' + drawn + 'Style'],
+      borderColor: cs['border' + drawn + 'Color'],
+      borderRadius: px(cs.borderTopLeftRadius),
+      color: cs.color,
+      fontSize: px(cs.fontSize),
+      fontWeight: cs.fontWeight,
+      fontFamily: cs.fontFamily,
+      textAlign: cs.textAlign,
+    }
+  }
+
+  var styleTimer = null
+  function applyStyle(selector, styles) {
+    var el = null
+    try { el = selector ? document.querySelector(selector) : null } catch (e) { /* bad selector */ }
+    if (!el) return false
+    for (var k in styles) {
+      if (!Object.prototype.hasOwnProperty.call(styles, k)) continue
+      if (styles[k] === null || styles[k] === '') el.style.removeProperty(k)
+      else el.style.setProperty(k, String(styles[k]))
+    }
+    if (!el.getAttribute('style')) el.removeAttribute('style')
+    /* a slider fires many of these a second — one save once it settles */
+    if (styleTimer) clearTimeout(styleTimer)
+    styleTimer = setTimeout(postEdited, 250)
+    return true
+  }
+
   window.addEventListener('message', function (ev) {
+    /* only the parent drives this document — a script inside the frame must
+       not be able to pose as the panel and push edits into the save path */
     if (ev.source !== parent) return
     var d = ev.data
     if (!d) return
-    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) {
-      render(d.html)
+    if (d.type === 'doop:inspect') {
+      parent.postMessage({ type: 'doop:inspect-result', reqId: d.reqId, info: d.expectedHtml === undefined || d.expectedHtml === renderedHtml ? inspect(d.selector) : null }, '*')
     }
+    if (d.type === 'doop:style' && d.styles && typeof d.styles === 'object') {
+      var applied = applyStyle(d.selector, d.styles)
+      parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, ok: applied, info: applied ? inspect(d.selector) : null }, '*')
+    }
+    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) render(d.html)
     if (d.type === 'doop:edit') setEdit(!!d.on)
     if (d.type === 'doop:probe') {
       parent.postMessage({ type: 'doop:probe-result', reqId: d.reqId, hit: probe(d.x, d.y) }, '*')
@@ -347,23 +466,11 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     if (d.type === 'doop:hover') {
       parent.postMessage({ type: 'doop:hover-result', reqId: d.reqId, hit: hoverProbe(d.x, d.y) }, '*')
     }
+    if (d.type === 'doop:select') {
+      parent.postMessage({ type: 'doop:select-result', reqId: d.reqId, hit: describe(d.selector) }, '*')
+    }
     if (d.type === 'doop:code') {
       parent.postMessage({ type: 'doop:code-result', reqId: d.reqId, html: elementCode(d.selector) }, '*')
-    }
-    if (d.type === 'doop:inspect-style') {
-      var inspection = null
-      try {
-        var matches = typeof d.selector === 'string' ? document.querySelectorAll(d.selector) : []
-        var inspected = matches.length === 1 ? matches[0] : null
-        if (inspected && document.body.contains(inspected)) {
-          var computed = getComputedStyle(inspected)
-          var values = {}
-          var keys = ${JSON.stringify(DESIGN_PROPERTY_KEYS)}
-          for (var ki = 0; ki < keys.length; ki++) values[keys[ki]] = computed.getPropertyValue(keys[ki])
-          inspection = { selector: d.selector, styles: values, rect: designRect(inspected) }
-        }
-      } catch (e) { /* invalid or stale selector */ }
-      parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, inspection: inspection }, '*')
     }
     if (d.type === 'doop:locate') {
       var found = null

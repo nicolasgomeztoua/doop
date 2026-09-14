@@ -200,16 +200,39 @@ export function treeExcerpt(paths: string[], sourcePath: string): string {
     .join('\n')
 }
 
+/** A line that begins with a tag — where a bare fragment starts. Commentary
+ *  lines never begin with `<`, so a tag mentioned mid-sentence is skipped. */
+const FRAGMENT_START = /^[ \t]*<[a-z][a-z0-9-]*[\s>/]/im
+
+/** Turn whatever the model returned into a full document string: a
+ *  `<!doctype>` document as-is, a bare `<html>` document with a doctype
+ *  added, or a component fragment wrapped in a minimal document. `undefined`
+ *  when none of those appear in `raw`. */
+function normalizeToDocument(raw: string): string | undefined {
+  const doctypeAt = raw.search(/<!doctype/i)
+  if (doctypeAt !== -1) return raw.slice(doctypeAt)
+
+  const htmlAt = raw.search(/<html[\s>]/i)
+  if (htmlAt !== -1) return `<!doctype html>\n${raw.slice(htmlAt)}`
+
+  const fragmentAt = raw.search(FRAGMENT_START)
+  if (fragmentAt !== -1) {
+    /* the empty <head> is where wrapGeneratedHtml injects the marker and CSP */
+    return `<!doctype html><html><head></head><body>\n${raw.slice(fragmentAt).trimStart()}\n</body></html>`
+  }
+
+  return undefined
+}
+
 export function extractHtml(blocks: { type: string; text?: string }[]): { html: string; height: number } {
   const text = blocks
     .filter((b) => b.type === 'text' && b.text)
     .map((b) => b.text)
     .join('\n')
   const fenced = text.match(/```(?:html)?\s*([\s\S]*?)```/)
-  let html = (fenced ? fenced[1]! : text).trim()
-  const start = html.search(/<!doctype/i)
-  if (start === -1) throw new Error('the model returned no HTML document')
-  html = html.slice(start)
+  const raw = (fenced ? fenced[1]! : text).trim()
+  const html = normalizeToDocument(raw)
+  if (!html) throw new Error('the model returned no HTML document')
   const height = Math.min(8000, Math.max(480, Number(html.match(/doop-height:\s*(\d+)/)?.[1]) || 900))
   return { html, height }
 }

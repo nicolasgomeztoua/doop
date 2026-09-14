@@ -1,0 +1,300 @@
+import { designSelector, indexDesignSelectors } from './designDocument'
+
+/**
+ * The Layers panel's view of a frame: the element tree of its HTML, parsed
+ * on the parent side (the iframe is sandboxed, so the panel cannot walk the
+ * live document). Every node carries the same selector the frame runtime
+ * produces for it (frameRuntime.ts cssPath), which is what lets a row in the
+ * panel and an outline in the frame refer to the same element.
+ */
+
+export type LayerKind = 'box' | 'text' | 'image' | 'svg'
+
+export interface LayerNode {
+  selector: string
+  tag: string
+  /** what the row shows: a text element shows its text, anything else its tag */
+  label: string
+  /** the first class (".hero") or id ("#nav") shown faint after the tag */
+  detail: string
+  kind: LayerKind
+  locked: boolean
+  hidden: boolean
+  children: LayerNode[]
+}
+
+/* markup that renders nothing of its own has no place in a layer list */
+const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TITLE', 'NOSCRIPT', 'TEMPLATE', 'BR', 'WBR'])
+const IMAGE_TAGS = new Set(['IMG', 'PICTURE', 'VIDEO', 'CANVAS'])
+
+/** Use the same source identity as guarded edits and the frame runtime. */
+export const elementPath = designSelector
+
+/** The nodes above the one with `selector`, outermost first — the rows that
+ *  must be open for its row to show. Walked on the tree rather than derived
+ *  from the selector string: a path anchored on an #id says nothing about the
+ *  elements above that id. Null when the selector is not in the tree. */
+export function ancestorsOf(nodes: LayerNode[], selector: string): LayerNode[] | null {
+  for (const node of nodes) {
+    if (node.selector === selector) return []
+    const below = ancestorsOf(node.children, selector)
+    if (below) return [node, ...below]
+  }
+  return null
+}
+
+function ownText(el: Element): string {
+  let text = ''
+  for (let n = el.firstChild; n; n = n.nextSibling) {
+    if (n.nodeType === Node.TEXT_NODE) text += n.nodeValue ?? ''
+  }
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function detailOf(el: Element): string {
+  if (el.id) return '#' + el.id
+  const cls = el.getAttribute('class')?.trim().split(/\s+/)[0]
+  return cls ? '.' + cls : ''
+}
+
+interface TreeRead {
+  budget: { count: number }
+  depth: number
+  selector(el: Element): string
+}
+
+function toNode(el: Element, read: TreeRead): LayerNode {
+  const tag = el.tagName.toLowerCase()
+  const base = {
+    selector: read.selector(el),
+    tag,
+    detail: detailOf(el),
+    locked: !!el.closest('[data-doop-locked]'),
+    hidden:
+      el.hasAttribute('hidden') ||
+      (el as HTMLElement).style?.display === 'none' ||
+      (el as HTMLElement).style?.visibility === 'hidden',
+  }
+  if (el.namespaceURI === 'http://www.w3.org/2000/svg')
+    return { ...base, label: el.getAttribute('data-doop-name') || 'svg', kind: 'svg', children: [] }
+  if (IMAGE_TAGS.has(el.tagName))
+    return {
+      ...base,
+      label: el.getAttribute('data-doop-name') || el.getAttribute('alt') || tag,
+      kind: 'image',
+      children: [],
+    }
+  const children = layerChildren(el, { ...read, depth: read.depth + 1 })
+  const name = el.getAttribute('data-doop-name')
+  if (name) return { ...base, label: name, kind: 'box', children }
+  const text = ownText(el)
+  if (children.length === 0 && text) {
+    return { ...base, label: text.length > 60 ? text.slice(0, 57) + '…' : text, detail: '', kind: 'text', children }
+  }
+  return { ...base, label: tag, kind: 'box', children }
+}
+
+function layerChildren(el: Element, read: TreeRead): LayerNode[] {
+  const out: LayerNode[] = []
+  for (const child of el.children) {
+    if (read.budget.count >= 3000 || read.depth > 80) break
+    if (!HIDDEN_TAGS.has(child.tagName)) {
+      read.budget.count++
+      out.push(toNode(child, read))
+    }
+  }
+  return out
+}
+
+/** The frame's layer tree: the body's children, in document order. */
+export function buildLayerTree(html: string): LayerNode[] {
+  if (!html) return []
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const unique = indexDesignSelectors(doc)
+  return layerChildren(doc.body, { budget: { count: 0 }, depth: 0, selector: (el) => designSelector(el, unique) })
+}
+
+/** Keep the nodes whose label or detail matches `query`, plus their ancestors. */
+export function filterLayers(nodes: LayerNode[], query: string): LayerNode[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return nodes
+  const out: LayerNode[] = []
+  for (const n of nodes) {
+    const children = filterLayers(n.children, q)
+    const hit = n.label.toLowerCase().includes(q) || n.detail.toLowerCase().includes(q) || n.tag.includes(q)
+    if (hit || children.length) out.push({ ...n, children: hit ? n.children : children })
+  }
+  return out
+}
+
+function parse(html: string): Document {
+  return new DOMParser().parseFromString(html, 'text/html')
+}
+
+function serialize(doc: Document): string {
+  return '<!doctype html>\n' + doc.documentElement.outerHTML
+}
+
+/** The element's own markup, for the clipboard. */
+/* a selector from a stale tree may no longer parse or resolve — both are "gone" */
+function find(doc: Document, selector: string): Element | null {
+  try {
+    return doc.querySelector(selector)
+  } catch {
+    return null
+  }
+}
+
+export function elementHtml(html: string, selector: string): string | null {
+  return find(parse(html), selector)?.outerHTML ?? null
+}
+
+/** The frame's HTML with the element removed, or null when the selector no longer resolves. */
+export function removeElement(html: string, selector: string): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  el.remove()
+  return serialize(doc)
+}
+
+/** The frame's HTML with the element's markup swapped for `outerHtml`. */
+export function replaceElement(html: string, selector: string, outerHtml: string): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  el.outerHTML = outerHtml
+  return serialize(doc)
+}
+
+/** The frame's HTML with a copy of the element inserted right after it. */
+export function duplicateElement(html: string, selector: string): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  const copy = el.cloneNode(true) as Element
+  renameIds(doc, copy)
+  el.after(copy)
+  return serialize(doc)
+}
+
+/** Where a moved element lands relative to its target: as its previous or
+ *  next sibling, or as its first child. */
+export type DropPlace = 'before' | 'after' | 'inside'
+
+export interface DropTarget {
+  selector: string
+  place: DropPlace
+}
+
+export interface MovedElement {
+  html: string
+  /** the element's selector after the move — its path changes with its position */
+  selector: string
+}
+
+/* the neighbouring layer the rail shows: markup that draws nothing is stepped over */
+function visibleSibling(el: Element, dir: -1 | 1): Element | null {
+  let cur = dir === -1 ? el.previousElementSibling : el.nextElementSibling
+  while (cur && HIDDEN_TAGS.has(cur.tagName)) cur = dir === -1 ? cur.previousElementSibling : cur.nextElementSibling
+  return cur
+}
+
+/** True when the element already sits where the drop would put it, as the
+ *  rail shows it — hopping over a hidden <script> is not a move. */
+function alreadyAt(el: Element, at: Element, where: DropPlace): boolean {
+  if (where === 'before') return visibleSibling(el, 1) === at
+  if (where === 'after') return visibleSibling(el, -1) === at
+  const first = at.firstElementChild
+  return el === (first && HIDDEN_TAGS.has(first.tagName) ? visibleSibling(first, 1) : first)
+}
+
+function move(doc: Document, el: Element, at: Element, where: DropPlace): MovedElement | null {
+  if (el === at || el.contains(at) || alreadyAt(el, at, where)) return null
+  if (el.closest('[data-doop-locked]') || at.closest('[data-doop-locked]')) return null
+  if (
+    where === 'inside' &&
+    (at.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+      ['IMG', 'INPUT', 'BR', 'HR', 'VIDEO', 'CANVAS'].includes(at.tagName))
+  )
+    return null
+  if (where === 'inside') at.prepend(el)
+  else if (where === 'before') at.before(el)
+  else at.after(el)
+  return { html: serialize(doc), selector: elementPath(el) }
+}
+
+/** The frame's HTML with the element moved next to, or into, the target.
+ *  Null when either selector no longer resolves, the target sits inside the
+ *  element (a node cannot hold itself), or the element is already there. */
+export function moveElement(html: string, selector: string, target: DropTarget): MovedElement | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  const at = find(doc, target.selector)
+  if (!el || !at) return null
+  return move(doc, el, at, target.place)
+}
+
+/** The frame's HTML with the element swapped past the layer above (-1) or
+ *  below (1) it. Null at either end of the list. */
+export function shiftElement(html: string, selector: string, dir: -1 | 1): MovedElement | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  const sibling = el && visibleSibling(el, dir)
+  if (!el || !sibling) return null
+  return move(doc, el, sibling, dir === -1 ? 'before' : 'after')
+}
+
+/* attributes whose value is an id, or a space-separated list of ids */
+const ID_REF_ATTRS = new Set([
+  'for',
+  'form',
+  'list',
+  'aria-labelledby',
+  'aria-describedby',
+  'aria-controls',
+  'aria-owns',
+])
+/* SVG paint servers, clips, masks, filters and markers: url(#id), in any attribute or inline style */
+const URL_REF = /url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g
+
+/** Give every id inside `copy` a fresh name and point the copy's own
+ *  references at the new names: label for, #fragment links, aria relations,
+ *  SVG use/href and url(#…) paints. Ids must stay unique — a copied id makes
+ *  selectors resolve to the original subtree — and a reference left on the
+ *  old name would keep wiring the copy to the original. References to ids
+ *  outside the copy are left alone. */
+function renameIds(doc: Document, copy: Element) {
+  const renamed = new Map<string, string>()
+  const taken = new Set<string>()
+  const withId = [copy, ...copy.querySelectorAll('[id]')].filter((n) => n.id)
+  for (const node of withId) {
+    let next = `${node.id}-copy`
+    for (let n = 2; doc.getElementById(next) || taken.has(next); n++) next = `${node.id}-copy-${n}`
+    renamed.set(node.id, next)
+    taken.add(next)
+    node.id = next
+  }
+  if (renamed.size === 0) return
+  const rename = (id: string) => renamed.get(id) ?? id
+  for (const node of [copy, ...copy.querySelectorAll('*')]) {
+    for (const { name, value } of [...node.attributes]) {
+      let next = value
+      if (name === 'href' || name === 'xlink:href') {
+        if (value.startsWith('#')) next = `#${rename(value.slice(1))}`
+      } else if (ID_REF_ATTRS.has(name)) {
+        next = value.replace(/\S+/g, rename)
+      }
+      next = next.replace(URL_REF, (_, quote: string, id: string) => `url(${quote}#${rename(id)}${quote})`)
+      if (next !== value) node.setAttribute(name, next)
+    }
+    /* a <style> carried inside the copy can name its own defs too */
+    if (node.tagName === 'STYLE' && node.textContent) {
+      const css = node.textContent.replace(
+        URL_REF,
+        (_, quote: string, id: string) => `url(${quote}#${rename(id)}${quote})`,
+      )
+      if (css !== node.textContent) node.textContent = css
+    }
+  }
+}

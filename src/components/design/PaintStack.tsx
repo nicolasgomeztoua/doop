@@ -35,7 +35,7 @@ export function PaintStack({
               className="px-1 text-xs disabled:opacity-25"
               onClick={() => {
                 const next = [...layers]
-                ;[next[index - 1], next[index]] = [next[index], next[index - 1]]
+                ;[next[index - 1], next[index]] = [next[index]!, next[index - 1]!]
                 onCommit(next.join(', '))
               }}
             >
@@ -236,7 +236,7 @@ function PaintFields({
                 stops: [
                   ...gradient.stops.slice(0, -1),
                   { color: '#ffffff', position: '50%' },
-                  gradient.stops[gradient.stops.length - 1],
+                  gradient.stops[gradient.stops.length - 1]!,
                 ],
               }),
             )
@@ -252,7 +252,7 @@ function PaintFields({
         <span className="mb-1 block text-[10px] text-ink-soft">Image URL</span>
         <DesignInput
           label={`${label} image URL`}
-          value={url[1]}
+          value={url[1] ?? ''}
           onCommit={(next) => onCommit(`url(${JSON.stringify(next)})`)}
         />
       </div>

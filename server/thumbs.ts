@@ -1,4 +1,4 @@
-import type { Frame } from '../shared/types.ts'
+import { PREVIEW_MAX_HEIGHT, type Frame } from '../shared/types.ts'
 import * as storage from './storage.ts'
 
 /**
@@ -48,7 +48,11 @@ async function render(frame: Frame): Promise<Buffer> {
   active++
   try {
     const { renderFrame } = await loadScreenshot()
-    return await renderFrame(frame, Math.min(1, 640 / frame.width), { type: 'jpeg', quality: 70, maxHeight: 1200 })
+    return await renderFrame(frame, Math.min(1, 640 / frame.width), {
+      type: 'jpeg',
+      quality: 70,
+      maxHeight: PREVIEW_MAX_HEIGHT,
+    })
   } finally {
     active--
     waiting.shift()?.()

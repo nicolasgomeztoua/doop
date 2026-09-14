@@ -9,8 +9,18 @@
 // room for the traffic lights. Tabs are purely a web-app concept — the shell
 // only marks the page as desktop; opening links in the system browser goes
 // through the opener plugin, granted in capabilities/default.json.
+//
+// Because tabs live in the page, the macOS menu is built here rather than
+// taken from Tauri's default: that one binds Cmd+W to "Close Window", which
+// on a single-window app closes the whole app. Ours binds Cmd+W to "Close
+// Tab" and hands the keystroke to the page as a `close-tab` event
+// (src/lib/desktop.ts closes the active canvas tab).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "macos")]
+use tauri::{AppHandle, Emitter};
 use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
@@ -85,9 +95,79 @@ fn place_traffic_lights(ns_window_ptr: *mut std::ffi::c_void) {
     }
 }
 
+/// Menu item id for Cmd+W; the page listens for the event of the same name.
+#[cfg(target_os = "macos")]
+const CLOSE_TAB: &str = "close-tab";
+
+/// Tauri's default macOS menu minus "Close Window" (Cmd+W), which is replaced
+/// by "Close Tab" in the File menu. Everything else stays: the app menu
+/// (About/Services/Hide/Quit), Edit (the predefined items are what make
+/// Cmd+C/V/Z reach the webview at all), View and Window.
+#[cfg(target_os = "macos")]
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let pkg = app.package_info();
+    let about = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        ..Default::default()
+    };
+    let app_menu = Submenu::with_items(
+        app,
+        pkg.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ],
+    )?;
+    let file = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[&MenuItem::with_id(app, CLOSE_TAB, "Close Tab", true, Some("Cmd+W"))?],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let view = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+    let window = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_menu, &file, &edit, &view, &window])
+}
+
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(build_menu).on_menu_event(|app, event| {
+        if event.id() == CLOSE_TAB {
+            let _ = app.emit(CLOSE_TAB, ());
+        }
+    });
+    builder
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
             if matches!(
@@ -120,12 +200,14 @@ fn main() {
                 });
             }
             // Marks every page loaded in the shell so the app can tell desktop
-            // sessions from browser ones (src/lib/posthog.ts) and render the
+            // sessions from browser ones (src/lib/shell.ts) and render the
             // tab strip; the version lets the app adapt to shell capabilities
-            // (traffic-light inset arrived with the overlay title bar, 0.1.2).
+            // (traffic-light inset arrived with the overlay title bar, 0.1.2)
+            // and the platform tells it which window framing it lives under.
             let desktop_marker = format!(
-                "window.__DOOP_DESKTOP__ = '{}';",
-                app.package_info().version
+                "window.__DOOP_DESKTOP__ = '{}'; window.__DOOP_DESKTOP_PLATFORM__ = '{}';",
+                app.package_info().version,
+                std::env::consts::OS
             );
             let builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(entry.parse()?))

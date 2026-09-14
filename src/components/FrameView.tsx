@@ -1,7 +1,9 @@
+import { saveDesignPatch, useDesignEditor } from '../lib/designEditor'
 import { memo, useEffect, useRef, useState } from 'react'
 import type { ElementComment, Frame } from '../../shared/types'
 import { colorFor } from '../../shared/types'
 import { useStore } from '../lib/store'
+import { registerFrameWindow, unregisterFrameWindow } from '../lib/frameBridge'
 import { api } from '../lib/api'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
@@ -17,21 +19,14 @@ import { AGENT_ROLES, DEFAULT_ROLE_ID, mentionedRole, roleName } from '../../sha
 import { posthog } from '../lib/posthog'
 import { isResidentLimit } from './TeamAllowance'
 import { cn } from '@/lib/utils'
-import { useExportSelectionReady } from '../lib/exportSelection'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Tooltip } from './ui/tooltip'
 import { GithubIcon, SyncIcon } from './ui/icons'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
-import {
-  currentSourceElement,
-  saveDesignPatch,
-  selectDesignElement,
-  selectDesignFrame,
-  useDesignEditor,
-  type ElementInspection,
-} from '../lib/designEditor'
+import { AgentIcon } from './AgentIcon'
+import { RoleMark } from './RoleMark'
 
 /* Counter-scale contract: chrome that keeps constant on-screen size divides
    by the `--zoom` variable the Stage publishes (capped at 2.4× when zoomed
@@ -102,10 +97,6 @@ interface HoverHit {
    this component — memo holds as long as the frame and raster are unchanged. */
 export const FrameView = memo(function FrameView({ frame, raster }: { frame: Frame; raster: number }) {
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
-  const exportReady = useExportSelectionReady()
-  const inspectorOpen = useStore((s) => s.inspectorOpen)
-  const designSelection = useDesignEditor((s) => (s.selection?.frameId === frame.id ? s.selection : null))
-  const designInspection = useDesignEditor((s) => (s.selection?.frameId === frame.id ? s.inspection : null))
   /* space held: the shield stays up even in edit mode, so the press reaches
      the Stage and pans instead of vanishing into the editable iframe */
   const panMode = useStore((s) => s.panMode)
@@ -124,6 +115,7 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   const [duping, setDuping] = useState(false)
   const dupKeyHeld = useDupModifier()
   const [editing, setEditing] = useState(false)
+  const inlineSource = useRef<string | null>(null)
   /* after exiting edit mode, hold renders until the final serialized HTML
      lands in the store — otherwise a stale post would morph the edit away */
   const [suspendPost, setSuspendPost] = useState(false)
@@ -254,17 +246,15 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
         trackSave(api.updateFrame(f.id, after).catch(console.error))
         updates.push({ frameId: f.id, before: g.orig, after })
       }
-      if (updates.length === 1) recordUpdate(updates[0].frameId, updates[0].before, updates[0].after)
+      const [only, ...more] = updates
+      if (only && !more.length) recordUpdate(only.frameId, only.before, only.after)
       else recordUpdates(updates)
       /* a click (no drag) on the frame surface targets the element under
          the cursor: probe it and show the element toolbar */
       if (!moved && probeOnClick) probeAt(off.x, off.y)
       else if (moved) closePopovers()
       /* a click (no drag) on the frame name opens the details panel */
-      if (!moved && panelOnClick) {
-        closePopovers()
-        selectDesignFrame(frame.id)
-      }
+      if (!moved && panelOnClick) useStore.getState().setInspectorOpen(true)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -283,64 +273,24 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   const [runtimeReady, setRuntimeReady] = useState(false)
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
-      if (ev.source !== iframeRef.current?.contentWindow) return
-      if (ev.data?.type === 'doop:frame-ready') {
+      if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
         setRuntimeReady(true)
       }
     }
     window.addEventListener('message', onMsg)
     return () => window.removeEventListener('message', onMsg)
   }, [])
+  /* once the runtime answers, the element panel may talk to this document */
+  useEffect(() => {
+    const win = iframeRef.current?.contentWindow
+    if (!runtimeReady || !win) return
+    registerFrameWindow(frame.id, win)
+    return () => unregisterFrameWindow(frame.id, win)
+  }, [runtimeReady, frame.id])
   useEffect(() => {
     if (!runtimeReady || editing || suspendPost) return
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:html', html }, '*')
   }, [runtimeReady, html, editing, suspendPost])
-
-  /* The parent owns source edits. This bridge only reads the sandbox; both
-     the window and request identity must match before accepting a reply. */
-  useEffect(() => {
-    if (!runtimeReady || !designSelection || editing) return
-    const reqId = crypto.randomUUID()
-    const selector = designSelection.selector
-    function request() {
-      iframeRef.current?.contentWindow?.postMessage({ type: 'doop:inspect-style', reqId, selector }, '*')
-    }
-    function receive(ev: MessageEvent) {
-      if (
-        ev.source !== iframeRef.current?.contentWindow ||
-        ev.data?.type !== 'doop:style-result' ||
-        ev.data.reqId !== reqId
-      )
-        return
-      const current = useDesignEditor.getState().selection
-      if (current?.frameId !== frame.id || current.selector !== selector) return
-      const info = ev.data.inspection as ElementInspection | null
-      if (!info) {
-        useDesignEditor.setState({ inspection: null })
-        return
-      }
-      if (
-        info.selector !== selector ||
-        !info.styles ||
-        typeof info.styles !== 'object' ||
-        !info.rect ||
-        !Object.values(info.rect).every((value) => typeof value === 'number' && Number.isFinite(value)) ||
-        !Object.values(info.styles).every((value) => typeof value === 'string' && value.length < 20000)
-      )
-        return
-      useDesignEditor.setState({
-        inspection: { ...info, rendered: { html, width: frame.width, height: frame.height } },
-      })
-    }
-    window.addEventListener('message', receive)
-    request()
-    // Stylesheets and web fonts may settle after the initial morph.
-    const timer = window.setTimeout(request, 500)
-    return () => {
-      window.removeEventListener('message', receive)
-      window.clearTimeout(timer)
-    }
-  }, [runtimeReady, html, designSelection, editing, raster, frame.id, frame.width, frame.height])
 
   /* ---- element comments ---- */
   const frameComments = useStore((s) => s.comments).filter((c) => c.frameId === frame.id)
@@ -429,18 +379,49 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:locate', reqId: '__probe__', selector: probeSel }, '*')
   }, [runtimeReady, html, probeSel])
 
+  /* deselecting the frame drops its element selection too, so a stale
+     outline never reappears when the frame is picked again */
+  const [wasSelected, setWasSelected] = useState(selected)
+  if (wasSelected !== selected) {
+    setWasSelected(selected)
+    if (!selected) setProbe(null)
+  }
+
+  /* the outlined element is shared with the Layers panel through the store:
+     what is probed here is picked (which also opens its properties panel,
+     the same as a click on its Layers row), and a row picked there is
+     resolved into a probe by asking the runtime for the element behind the
+     selector */
+  useEffect(() => {
+    const cur = useStore.getState().selectedElement
+    if (probeSel) {
+      useStore.getState().pickElement({ frameId: frame.id, selector: probeSel })
+    } else if (cur?.frameId === frame.id) {
+      useStore.getState().pickElement(null)
+    }
+  }, [probeSel, frame.id])
+  const wantedSel = useStore((s) => (s.selectedElement?.frameId === frame.id ? s.selectedElement.selector : null))
+  const selectReq = useRef(0)
+  useEffect(() => {
+    if (!runtimeReady || !wantedSel || wantedSel === probeSel) return
+    selectReq.current += 1
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: 'doop:select', reqId: selectReq.current, selector: wantedSel },
+      '*',
+    )
+  }, [runtimeReady, wantedSel, probeSel])
+
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.source !== iframeRef.current?.contentWindow) return
-      if (
-        ev.data?.type === 'doop:probe-result' &&
-        ev.data.reqId === probeReq.current &&
-        useDesignEditor.getState().inlineFrameId !== frame.id
-      ) {
+      if (ev.data?.type === 'doop:probe-result' && ev.data.reqId === probeReq.current) {
         setProbe(ev.data.hit ?? null)
-        if (ev.data.hit?.selector && useStore.getState().selectedId === frame.id && useStore.getState().inspectorOpen) {
-          selectDesignElement(frame.id, ev.data.hit.selector)
-        }
+      }
+      if (ev.data?.type === 'doop:select-result' && ev.data.reqId === selectReq.current) {
+        const hit = (ev.data.hit ?? null) as ProbeHit | null
+        closePopovers()
+        if (hit) setProbe(hit)
+        else useStore.getState().setSelectedElement(null) // the row's element is gone from the live document
       }
       if (ev.data?.type === 'doop:hover-result' && ev.data.reqId === hoverReq.current) {
         const hit = (ev.data.hit ?? null) as HoverHit | null
@@ -499,8 +480,9 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   const canEdit = !!frame.html && !stream && !/<script/i.test(frame.html)
 
   function enterEdit() {
+    inlineSource.current = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)?.html ?? null
+    useDesignEditor.setState({ inlineFrameId: frame.id })
     select(frame.id)
-    useDesignEditor.setState({ selection: null, inspection: null, inlineFrameId: frame.id })
     closePopovers()
     clearHover()
     setEditing(true)
@@ -516,16 +498,32 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     window.setTimeout(() => setSuspendPost(false), 500)
   }
 
+  useEffect(
+    () =>
+      useStore.subscribe((state, before) => {
+        if (state.selectedElement !== before.selectedElement && state.selectedElement?.frameId === frame.id && editing)
+          exitEdit()
+      }),
+    [frame.id, editing],
+  )
+
   /* serialized edits stream out of the iframe; save through the human path */
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.source !== iframeRef.current?.contentWindow) return
-      if (
-        ev.data?.type === 'doop:edited' &&
-        typeof ev.data.html === 'string' &&
-        useDesignEditor.getState().inlineFrameId === frame.id
-      ) {
+      if (ev.data?.type === 'doop:edited' && typeof ev.data.html === 'string') {
         const done = ev.data.editing === false
+        const live = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)
+        if (inlineSource.current !== null && live?.html !== inlineSource.current) {
+          useDesignEditor.setState((s) => ({
+            error: 'This frame changed while you were typing. Recover your unsaved HTML and review the latest design.',
+            saved: false,
+            unsavedHtml: { ...s.unsavedHtml, [frame.id]: ev.data.html },
+            ...(done ? { inlineFrameId: null } : {}),
+          }))
+          return
+        }
+        inlineSource.current = ev.data.html
         void saveDesignPatch(frame.id, { html: ev.data.html }).finally(() => {
           if (done && useDesignEditor.getState().inlineFrameId === frame.id)
             useDesignEditor.setState({ inlineFrameId: null })
@@ -541,54 +539,13 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     return () => window.removeEventListener('message', onMsg)
   }, [frame.id])
 
-  /* deselecting the frame ends the edit session */
+  /* deselecting the frame ends the edit session. Selection lives in the
+     store and the iframe has to be told, so this is a sync with an external
+     system rather than derived state. */
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- see above
     if (!selected && editing) exitEdit()
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (designSelection && editing) exitEdit()
-  }, [designSelection, editing])
-
-  useEffect(
-    () => () => {
-      if (useDesignEditor.getState().inlineFrameId === frame.id) useDesignEditor.setState({ inlineFrameId: null })
-    },
-    [frame.id],
-  )
-
-  useEffect(() => {
-    const s = useStore.getState()
-    // The layer navigator and inspector take precedence over an older click probe.
-    const source = designSelection ? currentSourceElement(frame.html, designSelection) : null
-    const inspected =
-      designSelection &&
-      designInspection?.selector === designSelection.selector &&
-      source &&
-      designInspection.rendered?.html === frame.html &&
-      designInspection.rendered.width === frame.width &&
-      designInspection.rendered.height === frame.height
-        ? { rect: designInspection.rect, label: source.tagName.toLowerCase() }
-        : null
-    const hit = editing ? activeHit : !inspectorOpen ? probe : null
-    s.setSelectedElement(
-      frame.id,
-      selected ? (designSelection ? inspected : hit ? { rect: hit.rect, label: hit.tag } : null) : null,
-    )
-    return () => s.setSelectedElement(frame.id, null)
-  }, [
-    frame.id,
-    frame.html,
-    frame.width,
-    frame.height,
-    selected,
-    designSelection,
-    designInspection,
-    editing,
-    activeHit,
-    inspectorOpen,
-    probe,
-  ])
 
   /* When zoomed past 100%, render the iframe k× larger and counter-scale it,
      with a matching CSS zoom inside — same layout, k× the raster density, so
@@ -675,24 +632,11 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               </Tooltip>
             )}
             <span className="overflow-hidden text-ellipsis">{frame.name}</span>
-            <Tooltip label="Present frame">
-              <Button
-                variant="bare"
-                size="icon-sm"
-                className="size-5"
-                aria-label={`Present ${frame.name}`}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={() => useStore.getState().presentFrame(frame.id)}
-              >
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path d="m5 3 8 5-8 5V3Z" stroke="currentColor" strokeLinejoin="round" />
-                </svg>
-              </Button>
-            </Tooltip>
             <span className="flex gap-1">
               {stream && (
                 <span className={EDITOR_CHIP} style={{ background: stream.color }}>
-                  ✦ {stream.name} is designing
+                  <AgentIcon name={stream.name} size={9} color="#fff" />
+                  {stream.name} is designing
                   <span className="after:content-['…'] after:[animation:ellipsis_1.2s_steps(4)_infinite]" />
                 </span>
               )}
@@ -700,7 +644,7 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                 .filter((p) => p.name !== stream?.name)
                 .map((p) => (
                   <span key={p.clientId} className={EDITOR_CHIP} style={{ background: p.color }}>
-                    {p.kind === 'agent' ? '✦' : '✎'} {p.name}
+                    {p.kind === 'agent' ? <AgentIcon name={p.name} size={9} color="#fff" /> : '✎'} {p.name}
                   </span>
                 ))}
             </span>
@@ -772,18 +716,6 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               <div
                 className="pointer-events-none absolute z-[3] shadow-[inset_0_0_0_calc(1.5px/var(--zoom,1))_#3c82f6,0_0_0_calc(1.5px/var(--zoom,1))_rgba(60,130,246,0.35)]"
                 style={{ left: probe.rect.x, top: probe.rect.y, width: probe.rect.width, height: probe.rect.height }}
-              />
-            )}
-            {designSelection && designInspection && selected && !editing && !dragging && (
-              <div
-                data-testid="design-selection-outline"
-                className="pointer-events-none absolute z-[4] shadow-[inset_0_0_0_calc(1.5px/var(--zoom,1))_var(--brand)]"
-                style={{
-                  left: designInspection.rect.x,
-                  top: designInspection.rect.y,
-                  width: designInspection.rect.width,
-                  height: designInspection.rect.height,
-                }}
               />
             )}
             {flash && (
@@ -929,27 +861,9 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                           <Button
                             variant="inverse"
                             className={EL_TOOLBAR_BTN}
-                            onClick={() => selectDesignElement(frame.id, anchor.selector)}
-                          >
-                            Design
-                          </Button>
-                          <Button
-                            variant="inverse"
-                            className={EL_TOOLBAR_BTN}
                             onClick={() => (codeView === null ? requestCode(anchor.selector) : setCodeView(null))}
                           >
                             {'</>'} Code
-                          </Button>
-                          <Button
-                            variant="inverse"
-                            className={EL_TOOLBAR_BTN}
-                            title="Export selected element"
-                            disabled={!exportReady}
-                            onClick={() =>
-                              useStore.getState().openElementExport(frame.id, { rect: anchor.rect, label: anchor.tag })
-                            }
-                          >
-                            Export
                           </Button>
                           {!editing && canEdit && anchor.text !== '' && (
                             <Button
@@ -1044,15 +958,16 @@ function CommentComposer({
               title={`${role.name} — ${role.blurb}`}
               onClick={() => setText((t) => (t ? t.replace(/\s*$/, ' ') : '') + `@${role.id} `)}
             >
-              {role.emoji} @{role.id}
+              <RoleMark role={role} size={13} /> @{role.id}
             </Button>
           ))}
         </div>
       )}
       <div className="flex items-center justify-end gap-2">
         {mentioned && (
-          <span className="mr-auto text-[11px] font-semibold text-brand">
-            {mentioned.emoji} {mentioned.name} will pick this up
+          <span className="mr-auto inline-flex items-center gap-1 text-[11px] font-semibold text-brand">
+            <RoleMark role={mentioned} size={13} />
+            {mentioned.name} will pick this up
           </span>
         )}
         <Button variant="solid" size="pill" className="px-3.5 py-[5px] text-xs" disabled={!text.trim()} onClick={send}>
@@ -1163,10 +1078,11 @@ function CommentThread({
         </Button>
         {mentioned && (
           <span
-            className="ml-auto truncate text-[11px] font-semibold text-brand"
+            className="ml-auto inline-flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold text-brand"
             title={`${mentioned.name} will pick this up`}
           >
-            {mentioned.emoji} {mentioned.name}
+            <RoleMark role={mentioned} size={13} />
+            <span className="truncate">{mentioned.name}</span>
           </span>
         )}
         <Button

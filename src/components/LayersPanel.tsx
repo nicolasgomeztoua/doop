@@ -1,460 +1,740 @@
-import { useEffect, useMemo, useState } from 'react'
+import { commitDesignEdit } from '../lib/designEditor'
+import { LayerAssets } from './design/LayerAssets'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type HTMLAttributes,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react'
 import type { Frame } from '../../shared/types'
 import { useStore } from '../lib/store'
-import { commitDesignEdit, selectDesignElement, selectDesignFrame, useDesignEditor } from '../lib/designEditor'
-import { flattenLayers, parseDesign, readLayers, type DesignLayer } from '../lib/designDocument'
+import { getIdentity } from '../lib/identity'
+import { deleteFramesTracked } from '../lib/history'
+import {
+  ancestorsOf,
+  buildLayerTree,
+  elementHtml,
+  filterLayers,
+  type DropPlace,
+  type DropTarget,
+  type LayerNode,
+} from '../lib/layers'
+import { deleteLayer, duplicateLayer, moveLayer, shiftLayer } from '../lib/layerEdits'
 import { cn } from '@/lib/utils'
-import { Panel, PanelBody, PanelClose, PanelHeader } from './ui/panel'
+import { AgentIcon } from './AgentIcon'
+import { LayerKindIcon } from './LayerKindIcon'
+import { FrameContextMenu } from './FrameContextMenu'
+import { Panel, PanelBody, PanelHeader } from './ui/panel'
 import { Button } from './ui/button'
-import { ChevronRightIcon } from './ui/icons'
-import { DesignInput } from './design/Controls'
+import { Input } from './ui/input'
+import { Tooltip } from './ui/tooltip'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from './ui/context-menu'
+import { MenuHint } from './ui/menu'
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CollapseAllIcon,
+  FrameIcon,
+  LayersIcon,
+  PanelCollapseIcon,
+  PanelExpandIcon,
+  PlusIcon,
+  SearchIcon,
+} from './ui/icons'
 
-interface FrameTree {
-  frame: Frame
-  layers: DesignLayer[]
-  truncated: boolean
+/* the tree indents 18px per level; frame rows sit at depth 0 */
+const INDENT = 18
+
+const railBtn = 'shrink-0 text-ink-faint hover:bg-paper-deep hover:text-ink'
+const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
+const editorChip = 'inline-flex flex-none items-center gap-[3px] rounded-full px-1.5 text-[9.5px] font-bold text-white'
+
+function rowKey(frameId: string, selector: string) {
+  return `${frameId}|${selector}`
 }
 
+/* one parse per frame html, shared between the search filter and the rows —
+   keyed by id and checked against the html, so a drag (a new frame object,
+   same html) never re-parses */
+const treeCache = new Map<string, { html: string; tree: LayerNode[] }>()
+function frameTree(frame: Frame): LayerNode[] {
+  const hit = treeCache.get(frame.id)
+  if (hit && hit.html === frame.html) return hit.tree
+  const tree = buildLayerTree(frame.html)
+  treeCache.set(frame.id, { html: frame.html, tree })
+  return tree
+}
+
+/** One visible line of the tree. The list is flat so the arrow keys can walk
+ *  it, and every element row knows its parent for ←. */
+type VisibleRow =
+  | { kind: 'frame'; key: string; frame: Frame; open: boolean; empty: boolean }
+  | { kind: 'node'; key: string; frame: Frame; node: LayerNode; depth: number; open: boolean; parentKey: string }
+type NodeVisibleRow = Extract<VisibleRow, { kind: 'node' }>
+
+/* a press has to travel this far before it is a drag rather than a click */
+const DRAG_THRESHOLD = 4
+/* the band at a row's top and bottom that means "next to", not "into" */
+const EDGE_BAND = 0.3
+
+function holds(node: LayerNode, selector: string): boolean {
+  return node.children.some((c) => c.selector === selector || holds(c, selector))
+}
+
+/** Where a drop over `row` lands — a line above or below it, or into it.
+ *  Only boxes take children; an open box's lower part reads as "into" so the
+ *  line under it always means "first child" rather than the ambiguous "after
+ *  the subtree". A frame row is the top of its body. */
+function dropOver(row: VisibleRow, fraction: number): DropPlace {
+  if (row.kind === 'frame') return 'inside'
+  if (row.node.kind !== 'box') return fraction < 0.5 ? 'before' : 'after'
+  if (fraction < EDGE_BAND) return 'before'
+  if (!row.open && fraction > 1 - EDGE_BAND) return 'after'
+  return 'inside'
+}
+
+function targetOf(row: VisibleRow, place: DropPlace): DropTarget {
+  return { selector: row.kind === 'frame' ? 'body' : row.node.selector, place }
+}
+
+function visibleRows(frames: Frame[], query: string, expanded: Set<string>): VisibleRow[] {
+  const rows: VisibleRow[] = []
+  for (const frame of frames) {
+    const tree = query ? filterLayers(frameTree(frame), query) : null
+    if (query && !frame.name.toLowerCase().includes(query) && tree?.length === 0) continue
+    const open = !!query || expanded.has(frame.id)
+    const nodes = open ? (tree ?? frameTree(frame)) : []
+    rows.push({ kind: 'frame', key: frame.id, frame, open, empty: open && nodes.length === 0 })
+    const walk = (list: LayerNode[], depth: number, parentKey: string) => {
+      for (const node of list) {
+        const key = rowKey(frame.id, node.selector)
+        const nodeOpen = node.children.length > 0 && (!!query || expanded.has(key))
+        rows.push({ kind: 'node', key, frame, node, depth, open: nodeOpen, parentKey })
+        if (nodeOpen) walk(node.children, depth + 1, key)
+      }
+    }
+    walk(nodes, 1, frame.id)
+  }
+  return rows
+}
+
+/** The Layers rail: every frame on the canvas, opening into the element tree
+ *  of its HTML. Selection runs both ways — a row selects the element in the
+ *  frame, a click in the frame highlights its row. */
 export function LayersPanel({
-  onClose,
   onAddFrame,
   surface = 'floating',
+  onClose,
 }: {
-  onClose(): void
-  onAddFrame(): void
+  onAddFrame: () => void
   surface?: 'floating' | 'inline'
+  onClose?: () => void
 }) {
-  const frames = useStore((s) => s.canvas?.frames)
+  const frames = useStore((s) => s.canvas?.frames ?? [])
   const selectedId = useStore((s) => s.selectedId)
-  const selection = useDesignEditor((s) => s.selection)
-  const busy = useDesignEditor((s) => s.busy)
-  const inlineFrameId = useDesignEditor((s) => s.inlineFrameId)
-  const [tab, setTab] = useState<'layers' | 'assets'>('layers')
-  const [search, setSearch] = useState('')
-  const [open, setOpen] = useState<Set<string>>(new Set())
-  const [imageUrl, setImageUrl] = useState('')
-  const needle = search.toLowerCase().trim()
-  // Collapsed frames need only their names. Read their HTML when a tree is
-  // expanded, a selected element needs revealing, or a canvas-wide search runs.
-  const trees = useMemo<FrameTree[]>(
-    () =>
-      (frames ?? []).map((frame) => ({
-        frame,
-        ...(tab === 'assets' || needle || open.has(`frame:${frame.id}`) || selection?.frameId === frame.id
-          ? readLayers(parseDesign(frame.html))
-          : { layers: [], truncated: false }),
-      })),
-    [frames, tab, needle, open, selection?.frameId],
-  )
+  const selectedElement = useStore((s) => s.selectedElement)
+  const setLayersOpen = useStore((s) => s.setLayersOpen)
+  const [query, setQuery] = useState('')
+  const [view, setView] = useState<'layers' | 'assets'>('layers')
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  /* the row being dragged and where it would land; the pointer handlers are
+     bound to the window for the length of the press, so they read the rows
+     through a ref rather than a stale closure */
+  const [drag, setDrag] = useState<NodeVisibleRow | null>(null)
+  const [drop, setDrop] = useState<{ key: string; place: DropPlace } | null>(null)
+  const rowsRef = useRef<VisibleRow[]>([])
+  const didDrag = useRef(false)
 
-  // Reveal all ancestors when selection originates from the canvas or inspector.
-  useEffect(() => {
-    if (!selection) return
-    const tree = trees.find((item) => item.frame.id === selection.frameId)
-    if (!tree) return
-    const layers = flattenLayers(tree.layers)
-    let selected = layers.find((layer) => layer.selector === selection.selector)
-    if (!selected) return
-    const ancestors = [`frame:${tree.frame.id}`]
-    while (selected?.parent) {
-      ancestors.push(`${tree.frame.id}:${selected.parent}`)
-      selected = layers.find((layer) => layer.selector === selected?.parent)
+  /* the selected frame opens on its own, and a selection made inside a frame
+     opens every row above it — derived from the selection during render, not
+     in an effect, so the tree is right on the first paint */
+  const [seenFrame, setSeenFrame] = useState(selectedId)
+  if (seenFrame !== selectedId) {
+    setSeenFrame(selectedId)
+    if (selectedId) setExpanded((prev) => new Set(prev).add(selectedId))
+  }
+  const [seenElement, setSeenElement] = useState(selectedElement)
+  if (seenElement !== selectedElement) {
+    setSeenElement(selectedElement)
+    if (selectedElement) {
+      const { frameId, selector } = selectedElement
+      const frame = frames.find((f) => f.id === frameId)
+      const above = frame ? (ancestorsOf(frameTree(frame), selector) ?? []) : []
+      setExpanded((prev) => {
+        const next = new Set(prev).add(frameId)
+        for (const node of above) next.add(rowKey(frameId, node.selector))
+        return next
+      })
     }
-    setOpen((previous) =>
-      ancestors.every((ancestor) => previous.has(ancestor)) ? previous : new Set([...previous, ...ancestors]),
-    )
-  }, [selection, trees])
+  }
 
-  function toggle(key: string) {
-    setOpen((previous) => {
-      const next = new Set(previous)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+  function setOpen(key: string, open: boolean) {
+    setExpanded((prev) => {
+      if (prev.has(key) === open) return prev
+      const next = new Set(prev)
+      if (open) next.add(key)
+      else next.delete(key)
       return next
     })
   }
-  function selectLayer(frameId: string, selector: string) {
-    if (selectedId !== frameId) useStore.getState().requestFlyTo(frameId)
-    selectDesignElement(frameId, selector)
+
+  const q = query.trim().toLowerCase()
+  const rows = useMemo(() => visibleRows(frames, q, expanded), [frames, q, expanded])
+  useEffect(() => {
+    rowsRef.current = rows
+  }, [rows])
+  const currentKey = selectedElement ? rowKey(selectedElement.frameId, selectedElement.selector) : selectedId
+
+  /* a layer row opens the element properties panel; a frame row closes it
+     and leaves the frame's own inspector to the frame-name click */
+  function activate(row: VisibleRow) {
+    const s = useStore.getState()
+    s.select(row.frame.id)
+    // An explicit pick also refreshes a stale source identity after a remote edit.
+    s.pickElement(null)
+    s.pickElement(row.kind === 'node' ? { frameId: row.frame.id, selector: row.node.selector } : null)
   }
-  function matches(layer: DesignLayer): boolean {
-    return (
-      !needle ||
-      `${layer.name} ${layer.tag} ${layer.text}`.toLowerCase().includes(needle) ||
-      layer.children.some(matches)
-    )
+
+  /* the drop under the pointer: a row of the dragged element's frame that is
+     neither the element itself nor inside it */
+  function dropAt(dragged: NodeVisibleRow, x: number, y: number) {
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-row-key]')
+    const row = el ? rowsRef.current.find((r) => r.key === el.dataset.rowKey) : undefined
+    if (!row || !el || row.frame.id !== dragged.frame.id || row.key === dragged.key) return null
+    if (row.kind === 'node' && holds(dragged.node, row.node.selector)) return null
+    const rect = el.getBoundingClientRect()
+    return { key: row.key, place: dropOver(row, (y - rect.top) / rect.height) }
   }
-  function keyNavigation(
-    e: React.KeyboardEvent,
-    expanded: boolean,
-    hasChildren: boolean,
-    toggleOpen: () => void,
-    activate: () => void,
-  ) {
-    if (e.target !== e.currentTarget) return
-    const items = [
-      ...(e.currentTarget.closest('[role="tree"]')?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []),
-    ]
-    const index = items.indexOf(e.currentTarget as HTMLElement)
-    if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
-      e.preventDefault()
-      e.stopPropagation()
-      const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : index + (e.key === 'ArrowDown' ? 1 : -1)
-      items[Math.max(0, Math.min(items.length - 1, next))]?.focus()
+
+  /* a press on a layer row turns into a drag once it travels; the row is
+     dropped where the pointer lets go, and the click that follows a drag is
+     swallowed so the drop does not double as a select. The target is read
+     again at release (the list may have scrolled under a still pointer), the
+     frame is read from the store (a collaborator may have edited it during
+     the drag — moveLayer refuses selectors that no longer resolve), and a
+     cancelled gesture drops nothing. */
+  function onRowPointerDown(e: ReactPointerEvent<HTMLDivElement>, row: NodeVisibleRow) {
+    if (e.button !== 0) return
+    const start = { x: e.clientX, y: e.clientY }
+    const body = e.currentTarget.closest<HTMLElement>('[data-slot="panel-body"]')
+    let active = false
+    const finish = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      setDrag(null)
+      setDrop(null)
     }
-    if (e.key === 'ArrowRight') {
-      e.preventDefault()
-      if (hasChildren && !expanded) toggleOpen()
-      else items[index + 1]?.focus()
-    }
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault()
-      if (hasChildren && expanded) toggleOpen()
-      else {
-        const level = Number(e.currentTarget.getAttribute('aria-level'))
-        items
-          .slice(0, index)
-          .reverse()
-          .find((item) => Number(item.getAttribute('aria-level')) < level)
-          ?.focus()
+    const onMove = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD) return
+        active = true
+        didDrag.current = true
+        setDrag(row)
       }
+      if (body) {
+        const rect = body.getBoundingClientRect()
+        if (ev.clientY < rect.top + 24) body.scrollBy(0, -8)
+        else if (ev.clientY > rect.bottom - 24) body.scrollBy(0, 8)
+      }
+      setDrop(dropAt(row, ev.clientX, ev.clientY))
     }
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault()
-      e.stopPropagation()
-      activate()
+    const onUp = (ev: PointerEvent) => {
+      const wasActive = active
+      finish()
+      if (!wasActive) return
+      const target = dropAt(row, ev.clientX, ev.clientY)
+      const over = target && rowsRef.current.find((r) => r.key === target.key)
+      const frame = useStore.getState().canvas?.frames.find((f) => f.id === row.frame.id)
+      if (over && target && frame) moveLayer(row.frame, row.node.selector, targetOf(over, target.place))
     }
-    if (e.key === 'F2') {
-      e.preventDefault()
-      activate()
-      requestAnimationFrame(() =>
-        document.querySelector<HTMLInputElement>('[aria-label="Layer name"], [aria-label="Frame name"]')?.focus(),
-      )
-    }
-  }
-  const actionClass =
-    'grid size-6 shrink-0 place-items-center rounded text-[11px] text-ink-faint hover:bg-paper-deep hover:text-ink disabled:opacity-30'
-
-  function renderLayer(frameId: string, layer: DesignLayer): React.ReactNode {
-    if (!matches(layer)) return null
-    const key = `${frameId}:${layer.selector}`
-    const expanded = !!needle || open.has(key)
-    const active = selection?.frameId === frameId && selection.selector === layer.selector
-    return (
-      <div key={key}>
-        <div
-          role="treeitem"
-          aria-level={layer.depth + 2}
-          aria-expanded={layer.children.length ? expanded : undefined}
-          aria-selected={active}
-          aria-label={layer.name}
-          tabIndex={active ? 0 : -1}
-          data-layer-selector={layer.selector}
-          className={cn(
-            'group flex h-8 cursor-default items-center gap-1 rounded-md pr-1 outline-none focus-visible:ring-1 focus-visible:ring-brand max-md:h-10',
-            active ? 'bg-brand/10 text-accent-ink' : 'text-ink-soft hover:bg-paper',
-            layer.hidden && 'opacity-50',
-          )}
-          style={{ paddingLeft: Math.min(layer.depth + 1, 9) * 12 + 4 }}
-          onClick={() => selectLayer(frameId, layer.selector)}
-          onDoubleClick={() => useStore.getState().requestFlyTo(frameId)}
-          onKeyDown={(e) =>
-            keyNavigation(
-              e,
-              expanded,
-              !!layer.children.length,
-              () => toggle(key),
-              () => selectLayer(frameId, layer.selector),
-            )
-          }
-        >
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${layer.name}`}
-            className={cn('grid size-4 shrink-0 place-items-center', !layer.children.length && 'invisible')}
-            onClick={(e) => {
-              e.stopPropagation()
-              toggle(key)
-            }}
-          >
-            <ChevronRightIcon className={cn('size-3 transition-transform', expanded && 'rotate-90')} />
-          </button>
-          <span className="w-4 shrink-0 text-center font-mono text-[11px] text-ink-faint">
-            {layer.image ? '▧' : layer.text.trim() ? 'T' : layer.tag === 'svg' ? '◇' : '▤'}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-[11px]" title={layer.name}>
-            {layer.name}
-          </span>
-          <div
-            className={cn(
-              'flex opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100',
-              (active || layer.locked || layer.hidden) && 'opacity-100',
-            )}
-          >
-            <button
-              type="button"
-              aria-label={`${layer.hidden ? 'Show' : 'Hide'} ${layer.name}`}
-              disabled={busy || inlineFrameId === frameId || layer.locked}
-              className={actionClass}
-              onClick={(e) => {
-                e.stopPropagation()
-                void commitDesignEdit(frameId, layer.selector, { type: 'visibility' })
-              }}
-            >
-              {layer.hidden ? '◌' : '◉'}
-            </button>
-            <button
-              type="button"
-              aria-label={`${layer.ownLocked ? 'Unlock' : 'Lock'} ${layer.name}`}
-              disabled={busy || inlineFrameId === frameId || (layer.locked && !layer.ownLocked)}
-              className={actionClass}
-              onClick={(e) => {
-                e.stopPropagation()
-                void commitDesignEdit(frameId, layer.selector, { type: 'lock' })
-              }}
-            >
-              {layer.locked ? '▣' : '▫'}
-            </button>
-          </div>
-        </div>
-        {expanded && layer.children.length > 0 && (
-          <div role="group">{layer.children.map((child) => renderLayer(frameId, child))}</div>
-        )}
-      </div>
-    )
+    const onCancel = () => finish()
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
   }
 
-  const visibleTrees = trees.filter(
-    (tree) => !needle || tree.frame.name.toLowerCase().includes(needle) || tree.layers.some(matches),
-  )
-  const assets = trees.flatMap((tree) =>
-    flattenLayers(tree.layers)
-      .filter((layer) => layer.image && (!needle || `${layer.name} ${layer.image}`.toLowerCase().includes(needle)))
-      .map((layer) => ({ frame: tree.frame, layer })),
-  )
+  /* ↑↓ walk the visible rows, ⌥↑↓ move the selected layer among its
+     siblings, ←→ close and open rows, ⌫ deletes what is selected, ↵ flies to
+     the frame — the panel is a tree, so it drives like one */
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
+    const index = rows.findIndex((r) => r.key === currentKey)
+    const row = index >= 0 ? rows[index] : undefined
+    const step = (dir: 1 | -1) => {
+      const next = rows[index < 0 ? (dir === 1 ? 0 : rows.length - 1) : index + dir]
+      if (next) activate(next)
+    }
+    const shift = (dir: 1 | -1) => {
+      if (row?.kind === 'node') shiftLayer(row.frame, row.node.selector, dir)
+    }
+    switch (e.key) {
+      case 'ArrowDown':
+        if (e.altKey) shift(1)
+        else step(1)
+        break
+      case 'ArrowUp':
+        if (e.altKey) shift(-1)
+        else step(-1)
+        break
+      case 'ArrowRight':
+        if (row && !row.open) setOpen(row.key, true)
+        else step(1)
+        break
+      case 'ArrowLeft':
+        if (row?.open) setOpen(row.key, false)
+        else if (row?.kind === 'node') {
+          const parent = rows.find((r) => r.key === row.parentKey)
+          if (parent) activate(parent)
+        }
+        break
+      case 'Enter':
+        if (row) useStore.getState().requestFlyTo(row.frame.id)
+        break
+      case 'Backspace':
+      case 'Delete':
+        if (row?.kind === 'frame') deleteFramesTracked([row.frame])
+        else if (row) deleteLayer(row.frame, row.node.selector)
+        break
+      default:
+        return
+    }
+    e.preventDefault()
+    e.stopPropagation()
+  }
+
   return (
     <Panel
       aria-label="Layer navigator"
       surface={surface}
-      className={cn(surface === 'floating' && 'left-3 inset-y-3 w-[248px]')}
+      className={surface === 'floating' ? 'left-3 inset-y-3 w-[300px]' : 'h-full'}
     >
-      <PanelHeader className="px-3 py-2">
-        <div className="flex gap-1" role="tablist" aria-label="Navigator view">
-          {(['layers', 'assets'] as const).map((value) => (
-            <button
-              type="button"
-              key={value}
-              role="tab"
-              aria-selected={tab === value}
-              className={cn(
-                'rounded-md px-2.5 py-1.5 text-[11px]',
-                tab === value ? 'bg-paper-deep text-ink' : 'text-ink-faint',
-              )}
-              onClick={() => setTab(value)}
-            >
-              {value}
-            </button>
-          ))}
-        </div>
-        <PanelClose label="Collapse layers" onClick={onClose}>
-          ⇤
-        </PanelClose>
+      <PanelHeader>
+        <span className="rounded-sm bg-paper-deep px-2 py-[3px] font-mono text-[11px] font-medium uppercase tracking-[0.09em] text-ink">
+          <button
+            aria-pressed={view === 'layers'}
+            className={view === 'layers' ? 'rounded bg-surface px-2 py-1 shadow-sm' : 'px-2 py-1'}
+            onClick={() => setView('layers')}
+          >
+            Layers
+          </button>
+          <button
+            className={view === 'assets' ? 'ml-1 rounded bg-surface px-2 py-1 shadow-sm' : 'ml-1 px-2 py-1'}
+            aria-pressed={view === 'assets'}
+            onClick={() => setView('assets')}
+          >
+            Assets
+          </button>
+        </span>
+        <Tooltip label="Collapse panel" side="bottom" align="end">
+          <Button
+            variant="bare"
+            size="icon-sm"
+            className={railBtn}
+            aria-label="Collapse panel"
+            onClick={() => (onClose ? onClose() : setLayersOpen(false))}
+          >
+            <PanelCollapseIcon width={13} height={13} />
+          </Button>
+        </Tooltip>
       </PanelHeader>
-      <div className="border-b border-line-soft px-3 py-3">
-        <input
+      <label className="mx-3 mt-2.5 mb-1 flex h-8 items-center gap-2 rounded-lg border border-line bg-paper px-2.5 text-ink-faint focus-within:border-ink">
+        <SearchIcon width={13} height={13} className="flex-none" />
+        <Input
+          variant="bare"
+          inputSize="auto"
+          className="h-full text-[12.5px] md:text-[12.5px]"
           aria-label="Search layers and assets"
-          placeholder={tab === 'layers' ? 'Search layers…' : 'Search images…'}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="h-8 w-full rounded-md border border-line-soft bg-paper/70 px-2.5 text-[11px] outline-none focus:border-brand max-md:h-10"
+          placeholder="Search layers"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
         />
+      </label>
+      <div className="flex items-center justify-between py-1 pr-2 pl-3.5 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-faint">
+        <span>Frames · {frames.length}</span>
+        <span className="flex gap-0.5">
+          <Tooltip label="Collapse all" side="bottom">
+            <Button
+              variant="bare"
+              size="icon-sm"
+              className={sectionBtn}
+              aria-label="Collapse all"
+              onClick={() => setExpanded(new Set())}
+            >
+              <CollapseAllIcon width={12} height={12} />
+            </Button>
+          </Tooltip>
+          <Tooltip label="New frame" side="bottom" align="end">
+            <Button variant="bare" size="icon-sm" className={sectionBtn} aria-label="New frame" onClick={onAddFrame}>
+              <PlusIcon width={12} height={12} />
+            </Button>
+          </Tooltip>
+        </span>
       </div>
-      <PanelBody>
-        {tab === 'layers' ? (
-          <>
-            <div className="flex items-center justify-between px-3 py-2.5">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-ink-faint">Frames</span>
-              <div className="flex gap-1">
-                <button
-                  type="button"
-                  aria-label="Collapse all layers"
-                  title="Collapse all layers"
-                  className={actionClass}
-                  onClick={() => setOpen(new Set())}
-                >
-                  ⊟
-                </button>
-                <button
-                  type="button"
-                  aria-label="Add frame"
-                  title="Add frame"
-                  className={actionClass}
-                  onClick={onAddFrame}
-                >
-                  +
-                </button>
-              </div>
+      {view === 'assets' ? (
+        <LayerAssets frames={frames} query={query} />
+      ) : (
+        <PanelBody
+          className={cn('px-2 pb-2 outline-none', drag && 'cursor-grabbing')}
+          role="tree"
+          tabIndex={0}
+          onKeyDown={onKeyDown}
+          onClickCapture={(e) => {
+            if (!didDrag.current) return
+            didDrag.current = false
+            e.stopPropagation()
+          }}
+        >
+          {frames.length === 0 && (
+            <div className="px-3 py-6 text-center text-[12.5px] text-ink-faint">
+              No frames yet. Press + to add one, or ask the agent for a design.
             </div>
-            <div role="tree" aria-label="Canvas layers" className="px-1.5 pb-4">
-              {visibleTrees.map(({ frame, layers, truncated }, index) => {
-                const key = `frame:${frame.id}`
-                const expanded = !!needle || open.has(key)
-                const active = selectedId === frame.id && !selection
-                return (
-                  <div key={frame.id}>
-                    <div
-                      role="treeitem"
-                      aria-label={frame.name}
-                      aria-level={1}
-                      aria-expanded={expanded}
-                      aria-selected={active}
-                      tabIndex={active || (index === 0 && !selection) ? 0 : -1}
-                      className={cn(
-                        'group flex h-9 cursor-default items-center gap-1 rounded-md px-1.5 outline-none focus-visible:ring-1 focus-visible:ring-brand',
-                        active ? 'bg-brand/10 text-accent-ink' : 'hover:bg-paper',
-                      )}
-                      onClick={() => {
-                        selectDesignFrame(frame.id)
-                        if (!open.has(key)) toggle(key)
-                      }}
-                      onDoubleClick={() => useStore.getState().requestFlyTo(frame.id)}
-                      onKeyDown={(e) =>
-                        keyNavigation(
-                          e,
-                          expanded,
-                          true,
-                          () => toggle(key),
-                          () => selectDesignFrame(frame.id),
-                        )
-                      }
-                    >
-                      <button
-                        type="button"
-                        tabIndex={-1}
-                        aria-label={`${expanded ? 'Collapse' : 'Expand'} ${frame.name}`}
-                        className="grid size-4 shrink-0 place-items-center"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          toggle(key)
-                        }}
-                      >
-                        <ChevronRightIcon className={cn('size-3 transition-transform', expanded && 'rotate-90')} />
-                      </button>
-                      <span className="w-4 shrink-0 text-center font-mono text-xs text-ink-faint">#</span>
-                      <span className="min-w-0 flex-1 truncate text-[11px] font-semibold" title={frame.name}>
-                        {frame.name}
-                      </span>
-                      <button
-                        type="button"
-                        aria-label={`Zoom to ${frame.name}`}
-                        className={cn(
-                          actionClass,
-                          'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100',
-                        )}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          selectDesignFrame(frame.id)
-                          useStore.getState().requestFlyTo(frame.id)
-                        }}
-                      >
-                        ⌖
-                      </button>
-                    </div>
-                    {expanded && (
-                      <div role="group">
-                        {layers.map((layer) => renderLayer(frame.id, layer))}
-                        {truncated && (
-                          <p className="px-4 py-2 text-[10px] text-ink-faint">
-                            Showing the first 3,000 layers, up to 80 levels deep.
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-              {!visibleTrees.length && (
-                <p className="px-4 py-8 text-center text-xs text-ink-faint">
-                  {needle ? 'No matching layers.' : 'Add a frame to start designing.'}
-                </p>
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="space-y-4 p-3">
-            <div>
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
-                Insert into selection
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  disabled={!selectedId || busy}
-                  onClick={() =>
-                    selectedId &&
-                    void commitDesignEdit(selectedId, selection?.selector || 'body', { type: 'insert', kind: 'text' })
-                  }
-                >
-                  + Text
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={!selectedId || busy}
-                  onClick={() =>
-                    selectedId &&
-                    void commitDesignEdit(selectedId, selection?.selector || 'body', { type: 'insert', kind: 'box' })
-                  }
-                >
-                  + Container
-                </Button>
-              </div>
-              <div className="mt-2">
-                <DesignInput label="New image URL" value={imageUrl} placeholder="Image URL…" onCommit={setImageUrl} />
-              </div>
-              <Button
-                size="sm"
-                className="mt-2 w-full"
-                disabled={!selectedId || busy}
-                onClick={() =>
-                  selectedId &&
-                  void commitDesignEdit(selectedId, selection?.selector || 'body', {
-                    type: 'insert',
-                    kind: 'image',
-                    src: imageUrl,
-                  })
-                }
-              >
-                + Image
-              </Button>
-            </div>
-            <div className="border-t border-line-soft pt-3">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
-                Images in this canvas · {assets.length}
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                {assets.map(({ frame, layer }) => (
-                  <button
-                    type="button"
-                    key={`${frame.id}:${layer.selector}`}
-                    className="min-w-0 overflow-hidden rounded-lg border border-line-soft text-left hover:border-brand"
-                    onClick={() => selectLayer(frame.id, layer.selector)}
-                  >
-                    <img src={layer.image} alt="" loading="lazy" className="h-20 w-full bg-paper object-cover" />
-                    <span className="block truncate p-2 text-[10px]" title={layer.name}>
-                      {layer.name}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {!assets.length && <p className="py-5 text-center text-xs text-ink-faint">No image layers found.</p>}
-            </div>
-          </div>
-        )}
-      </PanelBody>
-      <footer className="border-t border-line-soft px-3 py-2.5 text-[10px] text-ink-faint">
-        {trees.length} frames <span className="float-right">⇧1 Fit all · ⇧2 Selection</span>
+          )}
+          {frames.length > 0 && rows.length === 0 && (
+            <div className="px-3 py-6 text-center text-[12.5px] text-ink-faint">Nothing matches “{query.trim()}”.</div>
+          )}
+          {rows.map((row) =>
+            row.kind === 'frame' ? (
+              <FrameRow
+                key={row.key}
+                row={row}
+                selected={row.frame.id === selectedId && !selectedElement}
+                current={row.frame.id === selectedId}
+                drop={drop?.key === row.key ? drop.place : undefined}
+                onToggle={() => setOpen(row.key, !row.open)}
+                onActivate={() => activate(row)}
+              />
+            ) : (
+              <NodeRow
+                key={row.key}
+                row={row}
+                selected={row.key === currentKey}
+                dragging={drag?.key === row.key}
+                drop={drop?.key === row.key ? drop.place : undefined}
+                onToggle={() => setOpen(row.key, !row.open)}
+                onActivate={() => activate(row)}
+                onPointerDown={(e) => onRowPointerDown(e, row)}
+              />
+            ),
+          )}
+        </PanelBody>
+      )}
+      <footer className="flex flex-none items-center justify-between gap-2 whitespace-nowrap border-t border-line-soft px-3 py-[9px] font-mono text-[10px] tracking-[0.04em] text-ink-faint">
+        <span>
+          <Kbd>↑</Kbd>
+          <Kbd>↓</Kbd> move · <Kbd>⌥↑</Kbd>
+          <Kbd>⌥↓</Kbd> reorder · <Kbd>←</Kbd>
+          <Kbd>→</Kbd> fold
+        </span>
+        <span>
+          <Kbd>↵</Kbd> fly to frame
+        </span>
       </footer>
     </Panel>
+  )
+}
+
+/** The collapsed rail: a narrow column at the panel's spot with the expand
+ *  control and the Layers mark carrying the frame count, as in the design. */
+export function LayersRailToggle() {
+  const setLayersOpen = useStore((s) => s.setLayersOpen)
+  const count = useStore((s) => s.canvas?.frames.length ?? 0)
+  return (
+    <nav
+      aria-label="Layers panel"
+      className="absolute left-3 top-3 z-[35] flex w-12 flex-col items-center gap-1.5 rounded-[14px] border border-line bg-surface p-1.5 shadow-card"
+    >
+      <Tooltip label="Expand panel" side="right">
+        <Button
+          variant="bare"
+          size="icon-sm"
+          className="size-[34px] rounded-lg text-ink-soft hover:bg-paper-deep hover:text-ink"
+          aria-label="Expand panel"
+          onClick={() => setLayersOpen(true)}
+        >
+          <PanelExpandIcon width={16} height={16} />
+        </Button>
+      </Tooltip>
+      <span className="my-0.5 h-px w-6 bg-line-soft" />
+      <Tooltip label={`Layers · ${count} ${count === 1 ? 'frame' : 'frames'}`} side="right">
+        <Button
+          variant="bare"
+          size="icon-sm"
+          className="relative size-[34px] rounded-lg bg-brand/[0.06] text-brand hover:bg-brand/10 hover:text-brand"
+          aria-label={`Layers — ${count} frames`}
+          onClick={() => setLayersOpen(true)}
+        >
+          <LayersIcon width={16} height={16} />
+          {count > 0 && (
+            <span className="absolute -top-0.5 -right-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface bg-brand px-[3px] font-mono text-[8px] font-medium text-white">
+              {count}
+            </span>
+          )}
+        </Button>
+      </Tooltip>
+    </nav>
+  )
+}
+
+function FrameRow({
+  row,
+  selected,
+  current,
+  drop,
+  onToggle,
+  onActivate,
+}: {
+  row: Extract<VisibleRow, { kind: 'frame' }>
+  selected: boolean
+  /** the frame is selected, whether or not an element inside it is */
+  current: boolean
+  drop?: DropPlace
+  onToggle: () => void
+  onActivate: () => void
+}) {
+  const { frame } = row
+  const stream = useStore((s) => s.streams[frame.id])
+  const presences = useStore((s) => s.presences)
+  const me = getIdentity().clientId
+  const editors = Object.values(presences).filter(
+    (p) => p.activeFrameId === frame.id && p.clientId !== me && p.name !== stream?.name,
+  )
+  /* Paste from this menu lands mid-stage rather than under the rail */
+  const pasteAt = useRef({ x: 0, y: 0 })
+  return (
+    <>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <Row
+            data-row-key={row.key}
+            depth={0}
+            drop={drop}
+            caret={<Caret open={row.open} present />}
+            onCaret={onToggle}
+            icon={<FrameIcon width={13} height={13} />}
+            label={frame.name}
+            className={cn('font-semibold', current && !selected && 'text-brand [&_[data-icon]]:text-brand')}
+            selected={selected}
+            onClick={onActivate}
+            onDoubleClick={() => useStore.getState().requestFlyTo(frame.id)}
+            onContextMenu={() => {
+              pasteAt.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+              if (!useStore.getState().selectedIds.includes(frame.id)) onActivate()
+            }}
+            trailing={
+              <>
+                {stream && (
+                  <span className={editorChip} style={{ background: stream.color }}>
+                    <AgentIcon name={stream.name} size={8} color="#fff" />
+                    designing…
+                  </span>
+                )}
+                {editors.map((p) => (
+                  <span key={p.clientId} className={editorChip} style={{ background: p.color }}>
+                    {p.kind === 'agent' ? <AgentIcon name={p.name} size={8} color="#fff" /> : '✎'}
+                    {p.name}
+                  </span>
+                ))}
+              </>
+            }
+          />
+        </ContextMenuTrigger>
+        <FrameContextMenu frame={frame} at={pasteAt} />
+      </ContextMenu>
+      {row.empty && <div className="py-1 pl-[42px] text-[11.5px] text-ink-faint">empty frame</div>}
+    </>
+  )
+}
+
+function NodeRow({
+  row,
+  selected,
+  dragging,
+  drop,
+  onToggle,
+  onActivate,
+  onPointerDown,
+}: {
+  row: NodeVisibleRow
+  selected: boolean
+  dragging: boolean
+  drop?: DropPlace
+  onToggle: () => void
+  onActivate: () => void
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void
+}) {
+  const { frame, node } = row
+  const hasChildren = node.children.length > 0
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <Row
+          data-row-key={row.key}
+          depth={row.depth}
+          drop={drop}
+          caret={<Caret open={row.open} present={hasChildren} />}
+          onCaret={hasChildren ? onToggle : undefined}
+          icon={<LayerKindIcon kind={node.kind} />}
+          label={`${node.locked ? '🔒 ' : ''}${node.hidden ? '◌ ' : ''}${node.label}`}
+          detail={node.detail}
+          selected={selected}
+          className={cn(dragging && 'opacity-40')}
+          onClick={onActivate}
+          onContextMenu={onActivate}
+          onPointerDown={onPointerDown}
+        />
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem
+          onSelect={() => {
+            const html = elementHtml(frame.html, node.selector)
+            if (html) navigator.clipboard.writeText(html).catch(console.error)
+          }}
+        >
+          Copy HTML
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => navigator.clipboard.writeText(node.selector).catch(console.error)}>
+          Copy selector
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => void commitDesignEdit(frame.id, node.selector, { type: 'visibility' })}>
+          {node.hidden ? 'Show layer' : 'Hide layer'}
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => void commitDesignEdit(frame.id, node.selector, { type: 'lock' })}>
+          {node.locked ? 'Unlock layer' : 'Lock layer'}
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => void commitDesignEdit(frame.id, node.selector, { type: 'insert', kind: 'text' })}
+        >
+          Insert text
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => void commitDesignEdit(frame.id, node.selector, { type: 'insert', kind: 'box' })}
+        >
+          Insert container
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => duplicateLayer(frame, node.selector)}>Duplicate</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => shiftLayer(frame, node.selector, -1)}>
+          Move up
+          <MenuHint>⌥↑</MenuHint>
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => shiftLayer(frame, node.selector, 1)}>
+          Move down
+          <MenuHint>⌥↓</MenuHint>
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem tone="danger" onSelect={() => deleteLayer(frame, node.selector)}>
+          Delete element
+          <MenuHint>⌫</MenuHint>
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+/* Radix's context-menu trigger (asChild) hands its own handlers and data
+   attributes down through these props, so everything unknown is spread onto
+   the div and our handlers compose with, rather than replace, its own. */
+type RowProps = Omit<HTMLAttributes<HTMLDivElement>, 'onClick'> & {
+  depth: number
+  caret: ReactNode
+  onCaret?: () => void
+  icon: ReactNode
+  label: string
+  detail?: string
+  selected: boolean
+  /** where a dragged layer would land on this row */
+  drop?: DropPlace
+  trailing?: ReactNode
+  onClick: () => void
+}
+
+function Row({
+  depth,
+  caret,
+  onCaret,
+  icon,
+  label,
+  detail,
+  selected,
+  drop,
+  className,
+  trailing,
+  onClick,
+  ...rest
+}: RowProps) {
+  const ref = useRef<HTMLDivElement>(null)
+  /* a selection made in the frame may sit far down the tree — bring it into view */
+  useEffect(() => {
+    if (selected) ref.current?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
+  return (
+    <div
+      {...rest}
+      ref={ref}
+      role="treeitem"
+      aria-selected={selected}
+      className={cn(
+        'relative flex h-[26px] cursor-default select-none items-center gap-1 whitespace-nowrap rounded-md pr-1.5 text-[12.5px] text-ink hover:bg-paper-deep',
+        selected && 'bg-brand text-white hover:bg-brand [&_[data-icon]]:text-white/85',
+        drop === 'inside' && 'shadow-[inset_0_0_0_2px_var(--brand)]',
+        className,
+      )}
+      style={{ ...rest.style, paddingLeft: 6 + depth * INDENT }}
+      onClick={onClick}
+    >
+      {(drop === 'before' || drop === 'after') && (
+        <span
+          aria-hidden
+          className={cn(
+            'pointer-events-none absolute right-1 z-[1] h-0.5 rounded-full bg-brand',
+            drop === 'before' ? '-top-px' : '-bottom-px',
+          )}
+          style={{ left: 6 + depth * INDENT }}
+        />
+      )}
+      <span
+        data-icon
+        className={cn('grid size-3.5 flex-none place-items-center text-ink-faint', onCaret && 'cursor-pointer')}
+        onClick={(e) => {
+          if (!onCaret) return
+          e.stopPropagation()
+          onCaret()
+        }}
+      >
+        {caret}
+      </span>
+      <span data-icon className="grid size-4 flex-none place-items-center text-ink-faint">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 overflow-hidden text-ellipsis">
+        {label}
+        {detail && <span className={cn('text-ink-faint', selected && 'text-white/85')}>{detail}</span>}
+      </span>
+      {trailing && <span className="flex flex-none items-center gap-1">{trailing}</span>}
+    </div>
+  )
+}
+
+function Caret({ open, present }: { open: boolean; present: boolean }) {
+  if (!present) return null
+  return open ? <ChevronDownIcon width={11} height={11} /> : <ChevronRightIcon width={11} height={11} />
+}
+
+function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="mr-0.5 inline-block rounded-[5px] border border-line bg-paper px-1 font-mono text-[9.5px] leading-[15px] text-ink-soft">
+      {children}
+    </kbd>
   )
 }

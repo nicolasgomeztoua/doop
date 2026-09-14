@@ -13,8 +13,11 @@ import { getImage } from './previews.ts'
 import { parseExportScale, exportSizeError, parseExportCrop } from '../shared/frameExport.ts'
 import * as actions from './actions.ts'
 import { canAccessCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
-import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, oidcPublicConfig } from './auth.ts'
+import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
 import { adminRouter } from './admin.ts'
+import { communityRouter, parseListing, publishableFrames } from './community.ts'
+import { automationsRouter, startScheduler } from './automations.ts'
+import { integrationsRouter } from './integrations.ts'
 import * as demo from './demo.ts'
 import { db, initDb } from './db/index.ts'
 import * as authSchema from './db/auth-schema.ts'
@@ -29,12 +32,15 @@ import {
   MAX_ASSET_BYTES,
 } from './assets.ts'
 import * as ingest from './ingest.ts'
+import * as backgrounds from './backgrounds.ts'
+import * as storage from './storage.ts'
 import * as github from './github.ts'
 import * as githubApp from './githubApp.ts'
 import { seed } from './seed.ts'
 import * as allowance from './allowance.ts'
 import * as modelAccounts from './modelAccounts.ts'
 import { serverTierInfo } from './agentModel.ts'
+import { serverImageGenEnabled } from './imageGen.ts'
 import { AGENT_MODELS } from './openaiAgent.ts'
 import { mentionedRole } from '../shared/agents.ts'
 import { colorFor } from '../shared/types.ts'
@@ -59,6 +65,7 @@ const BUILD_ID = (() => {
 
 /* boot: connect the DB, hydrate memory, import pre-DB store.json once */
 await initDb()
+await backgrounds.initBackgrounds()
 initAuth()
 await syncAdmins() // ADMIN_EMAILS -> user.role, for accounts that already exist
 let data = await persist.hydrate()
@@ -112,7 +119,10 @@ process.on('unhandledRejection', (reason) => {
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.once(sig, () => {
     setTimeout(() => process.exit(0), 1500).unref()
-    persist.flush((id) => store.getFrame(id)).finally(() => process.exit(0))
+    persist
+      .flush((id) => store.getFrame(id))
+      .catch((err) => console.error('flush on shutdown failed', err))
+      .finally(() => process.exit(0))
   })
 }
 
@@ -368,6 +378,25 @@ app.get('/a/:id.:ext', async (req, res) => {
   }
 })
 
+/* Curated background library (server/backgrounds.ts): /bg/<id>.webp and  */
+/* /bg/<id>-t.webp straight from object storage. Public and immutable —  */
+/* the catalog is checked in, the bytes are put there by the import      */
+/* script and never rewritten under the same id.                         */
+app.get('/bg/:file', async (req, res) => {
+  const key = backgrounds.keyForFile(req.params.file)
+  if (!key) return res.status(404).end()
+  try {
+    const buf = await storage.getObject(key)
+    if (!buf) return res.status(404).end()
+    res.set('Content-Type', 'image/webp')
+    res.set('Cache-Control', 'public, max-age=31536000, immutable')
+    res.set('X-Content-Type-Options', 'nosniff')
+    res.send(buf)
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : 'background fetch failed' })
+  }
+})
+
 /* ------------------------------------------------------------------ */
 /* One-time asset uploads: the upload_asset MCP tool mints a ticket and */
 /* the agent curls the file here (curl -T file /u/<token>), so bytes    */
@@ -439,7 +468,7 @@ app.put('/u/:token', async (req, res) => {
    plugin adds are refused by default rather than discovered later. */
 const MCP_OAUTH_PATHS = /^\/api\/auth\/(mcp\/|oauth2\/(authorize|consent|token))/
 const VIEW_AS_ALLOWED = /^\/api\/auth\/(sign-out|admin\/stop-impersonating)$/
-app.all('/api/auth/*', async (req, res) => {
+app.all('/api/auth/*', async (req, res, next) => {
   const restricted = MCP_OAUTH_PATHS.test(req.path) || (req.method !== 'GET' && !VIEW_AS_ALLOWED.test(req.path))
   if (restricted) {
     const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) }).catch(() => null)
@@ -447,7 +476,7 @@ app.all('/api/auth/*', async (req, res) => {
       return res.status(403).json({ error: 'viewing as another user — read only' })
     }
   }
-  toNodeHandler(auth)(req, res)
+  toNodeHandler(auth)(req, res).catch(next)
 })
 
 app.use(express.json({ limit: '10mb' }))
@@ -468,9 +497,9 @@ app.post('/api/account-exists', async (req, res) => {
 
 /* Public: is SSO configured, and what should the login button say? Static
    build shared across self-hosted deploys can't know this at build time —
-   see server/auth.ts oidcPublicConfig for what's safe to expose here. */
+   see server/auth.ts loginProvidersConfig for what's safe to expose here. */
 app.get('/api/oidc-config', (req, res) => {
-  res.json(oidcPublicConfig())
+  res.json(loginProvidersConfig())
 })
 
 /* ------------------------------------------------------------------ */
@@ -576,6 +605,9 @@ function requireFrame(req: express.Request, res: express.Response, frameId: stri
 }
 
 app.use('/api/admin', adminRouter)
+app.use('/api/community', communityRouter)
+app.use('/api/automations', automationsRouter)
+app.use('/api/integrations', integrationsRouter)
 
 /* free-tier meter for the resident team: {used, limit, connected, byoModel} */
 app.get('/api/agent-allowance', (req, res) => {
@@ -716,6 +748,27 @@ app.post('/api/canvases/:id/duplicate', async (req, res) => {
 app.get('/api/canvases/:id', (req, res) => {
   const c = requireCanvas(req, res, req.params.id)
   if (c) res.json(c)
+})
+
+/* Community gallery listing — the owner's call alone, like link access.
+   PUT both lists and re-describes; DELETE takes it down. */
+app.put('/api/canvases/:id/publish', (req, res) => {
+  const c = requireCanvas(req, res, req.params.id)
+  if (!c) return
+  if (c.ownerId !== req.user!.id) return res.status(403).json({ error: 'only the owner can publish a canvas' })
+  if (!publishableFrames(c).length) return res.status(400).json({ error: 'add a frame before publishing' })
+  const listing = parseListing(req.body)
+  if (typeof listing === 'string') return res.status(400).json({ error: listing })
+  const published = store.publishCanvas(c.id, listing)!
+  res.json({ publishedAt: published.publishedAt, description: published.description, category: published.category })
+})
+
+app.delete('/api/canvases/:id/publish', (req, res) => {
+  const c = requireCanvas(req, res, req.params.id)
+  if (!c) return
+  if (c.ownerId !== req.user!.id) return res.status(403).json({ error: 'only the owner can unpublish a canvas' })
+  store.unpublishCanvas(c.id)
+  res.json({ ok: true })
 })
 
 app.post('/api/canvases/:id/claim', (req, res) => {
@@ -1311,7 +1364,8 @@ app.post('/api/canvases/:id/import', async (req, res) => {
       }
       /* Validate the whole batch before consuming a slot or opening Chromium. */
       const validated = requested.map((url) => assertPublicHttpUrl(url))
-      if (validated.some((url) => !isSameSiteUrl(url, validated[0]))) {
+      const [first, ...rest] = validated
+      if (first && rest.some((url) => !isSameSiteUrl(url, first))) {
         return res.status(400).json({ error: 'all selected pages must belong to the same website' })
       }
       const urls = [...new Set(validated.map((url) => url.href))]
@@ -1491,25 +1545,7 @@ app.get('/.well-known/oauth-protected-resource', protectedResourceMetadata)
 /* path-aware variant some clients probe for a resource at /mcp */
 app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceMetadata)
 
-/* Internal-deployment extras, loaded only when configured: a server-rendered
-   /blog (headless WordPress) and a marketing-site proxy for signed-out `/`.
-   Both must precede the SPA catch-all. The module paths go through variables
-   because the open-source export ships without these files — an unresolved
-   static import would break its typecheck, an unexecuted dynamic one can't. */
-if (process.env.WORDPRESS_API_URL) {
-  const blogModule = './blog/index.ts'
-  const { mountBlog } = (await import(blogModule)) as { mountBlog: (a: express.Express) => void }
-  mountBlog(app)
-}
-if (process.env.MARKETING_ORIGIN) {
-  const marketingModule = './marketing.ts'
-  const { mountMarketing } = (await import(marketingModule)) as { mountMarketing: (a: express.Express) => void }
-  mountMarketing(app)
-}
-
-/* robots + minimal sitemap for every deployment. Registered after the blog
-   mount on purpose: a configured blog registered its richer, WP-aware
-   sitemap above, and the first matching route wins. */
+/* robots + minimal sitemap for every deployment */
 app.get('/robots.txt', (_req, res) => {
   res
     .type('text/plain')
@@ -1667,4 +1703,11 @@ server.listen(PORT, () => {
       ? `⟡ doop agent        on — free tier on this server’s ${tier.provider === 'azure' ? 'Azure OpenAI deployment' : 'Anthropic key'}, then each user’s own model account`
       : `⟡ doop agent        no server ${tier.provider === 'azure' ? 'Azure config' : 'key'} — runs only for users who connect their own ChatGPT subscription or OpenAI key (${tier.provider === 'azure' ? 'set the AZURE_OPENAI_* vars' : 'set ANTHROPIC_API_KEY'} for a free tier; agents connected over MCP work regardless)`,
   )
+  console.log(
+    serverImageGenEnabled()
+      ? '⟡ image generation  on — each user’s connected ChatGPT/OpenAI account, else this server’s OPENAI_API_KEY'
+      : '⟡ image generation  on for users with a connected ChatGPT/OpenAI account only (set OPENAI_API_KEY to cover everyone else)',
+  )
+  /* automations fire from here: one tick a minute over the due rows */
+  startScheduler()
 })

@@ -47,7 +47,7 @@ describe('frame presentation', () => {
     s.patchFrameLocal(frame.id, { html: '<h1>Updated</h1>', height: 1800 })
     s.setCanvas(useStore.getState().canvas)
     expect(useStore.getState().presentedFrameId).toBe(frame.id)
-    expect(useStore.getState().canvas?.frames[0].height).toBe(1800)
+    expect(useStore.getState().canvas?.frames[0]!.height).toBe(1800)
   })
 
   it('closes when the presented frame is deleted remotely', () => {

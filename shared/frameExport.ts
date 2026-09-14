@@ -92,6 +92,6 @@ export function parseExportCrop(value: unknown, frame: Pick<Frame, 'width' | 'he
   if (typeof value !== 'string') throw new Error('Invalid export region.')
   const parts = value.split(',')
   if (parts.length !== 4 || parts.some((part) => !part.trim())) throw new Error('Invalid export region.')
-  const [x, y, width, height] = parts.map(Number)
+  const [x, y, width, height] = parts.map(Number) as [number, number, number, number]
   return clipExportRegion(frame, { x, y, width, height })
 }

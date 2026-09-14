@@ -1,7 +1,8 @@
+import { openSelectionExport } from '../lib/exportSelection'
 import type { MutableRefObject } from 'react'
 import type { Frame } from '../../shared/types'
 import { api } from '../lib/api'
-import { copyFrame, duplicateFrame, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
+import { copyFrames, duplicateFrames, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { deleteFramesTracked } from '../lib/history'
 import { useStore } from '../lib/store'
 import { MOD_KEY } from '../lib/keys'
@@ -13,17 +14,20 @@ import { MenuHint } from './ui/menu'
 export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefObject<{ x: number; y: number }> }) {
   /* a right-click inside a multi-selection acts on the whole group */
   const groupSize = useStore((s) => (s.selectedIds.includes(frame.id) ? s.selectedIds.length : 1))
-  function deleteSelection() {
+  function groupFrames(): Frame[] {
     const s = useStore.getState()
     const ids = s.selectedIds.includes(frame.id) ? s.selectedIds : [frame.id]
-    deleteFramesTracked(s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame])
+    return s.canvas?.frames.filter((f) => ids.includes(f.id)) ?? [frame]
+  }
+  function deleteSelection() {
+    deleteFramesTracked(groupFrames())
   }
   return (
     <ContextMenuContent>
       <ContextMenuItem onSelect={() => useStore.getState().presentFrame(frame.id)}>Present frame</ContextMenuItem>
-      <ContextMenuSeparator />
-      <ContextMenuItem onSelect={() => copyFrame(frame)}>
-        Copy
+      <ContextMenuItem onSelect={() => void openSelectionExport(frame.id)}>Export selection…</ContextMenuItem>
+      <ContextMenuItem onSelect={() => copyFrames(groupFrames())}>
+        {groupSize > 1 ? `Copy ${groupSize} frames` : 'Copy'}
         <MenuHint>{MOD_KEY}C</MenuHint>
       </ContextMenuItem>
       <ContextMenuItem
@@ -33,8 +37,8 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
         Paste
         <MenuHint>{MOD_KEY}V</MenuHint>
       </ContextMenuItem>
-      <ContextMenuItem onSelect={() => duplicateFrame(frame)}>
-        Duplicate
+      <ContextMenuItem onSelect={() => duplicateFrames(groupFrames())}>
+        {groupSize > 1 ? `Duplicate ${groupSize} frames` : 'Duplicate'}
         <MenuHint>{MOD_KEY}D</MenuHint>
       </ContextMenuItem>
       <ContextMenuSeparator />
@@ -46,8 +50,11 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
       <ContextMenuItem onSelect={() => navigator.clipboard.writeText(`${location.origin}/i/${frame.id}.png?scale=2`)}>
         Copy image URL
       </ContextMenuItem>
-      <ContextMenuItem onSelect={() => useStore.getState().openExport(frame.id)}>
-        {groupSize > 1 ? `Export ${groupSize} frames…` : 'Export frame…'}
+      <ContextMenuItem asChild>
+        <a href={`/i/${frame.id}.png?scale=2&download`}>Download PNG</a>
+      </ContextMenuItem>
+      <ContextMenuItem asChild>
+        <a href={`/i/${frame.id}.jpg?scale=2&download`}>Download JPG</a>
       </ContextMenuItem>
       <ContextMenuSeparator />
       <ContextMenuItem

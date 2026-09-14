@@ -7,6 +7,8 @@ import { MeterLine, isResidentLimit, useAllowance } from './TeamAllowance'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Note } from './ui/note'
+import { DoopMark } from './Logo'
+import { AttachmentIcon } from './ui/icons'
 
 /**
  * The canvas's front door to the resident team: a prompt bar that queues a
@@ -177,7 +179,7 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
         className="flex items-center gap-2 rounded-[12px] border border-line bg-surface p-1.5 shadow-pop max-md:gap-[3px] max-md:p-[5px]"
         onSubmit={(e) => {
           e.preventDefault()
-          submit(text)
+          void submit(text)
         }}
       >
         <input
@@ -199,19 +201,7 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
           disabled={busy}
           onClick={() => fileRef.current?.click()}
         >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-          </svg>
+          <AttachmentIcon aria-hidden />
         </Button>
         <Input
           ref={inputRef}
@@ -246,7 +236,7 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
           </Note>
         ) : sent ? (
           <Note size="sm" className="text-xs text-ink-soft">
-            ✦ The Doop Agent is on it — watch the canvas
+            <DoopMark size={11} /> The Doop Agent is on it — watch the canvas
           </Note>
         ) : (
           <MeterLine allowance={allowance} />

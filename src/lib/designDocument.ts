@@ -1,19 +1,5 @@
 import { normalizeDesignValue, splitCssList } from './designProperties'
 
-export interface DesignLayer {
-  selector: string
-  parent: string | null
-  name: string
-  tag: string
-  depth: number
-  children: DesignLayer[]
-  hidden: boolean
-  locked: boolean
-  ownLocked: boolean
-  text: string
-  image?: string
-}
-
 const OMIT = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE', 'SOURCE', 'TITLE'])
 const NODE_ID = 'data-doop-node'
 
@@ -33,13 +19,14 @@ function anchoredSelector(el: Element, unique: (attribute: string, value: string
   return null
 }
 
-export function designSelector(el: Element): string {
+export function designSelector(el: Element, unique?: (attribute: string, value: string) => boolean): string {
   const anchor = anchoredSelector(
     el,
-    (attribute, value) =>
-      el.ownerDocument.querySelectorAll(
-        attribute === 'id' ? `#${CSS.escape(value)}` : `[${attribute}="${CSS.escape(value)}"]`,
-      ).length === 1,
+    unique ??
+      ((attribute, value) =>
+        el.ownerDocument.querySelectorAll(
+          attribute === 'id' ? `#${CSS.escape(value)}` : `[${attribute}="${CSS.escape(value)}"]`,
+        ).length === 1),
   )
   if (anchor) return anchor
   const parts: string[] = []
@@ -60,7 +47,7 @@ export function sourceElement(doc: Document, selector: string): HTMLElement | SV
     const matches = doc.querySelectorAll(selector)
     if (matches.length !== 1) return null
     const el = matches[0]
-    if (!doc.body.contains(el) || OMIT.has(el.tagName.toUpperCase()) || !('style' in el)) return null
+    if (!el || !doc.body.contains(el) || OMIT.has(el.tagName.toUpperCase()) || !('style' in el)) return null
     return el as HTMLElement | SVGElement
   } catch {
     return null
@@ -78,11 +65,8 @@ export function layerName(el: Element): string {
   )
 }
 
-export function readLayers(doc: Document): { layers: DesignLayer[]; truncated: boolean } {
-  let count = 0
-  let truncated = false
-  // Index uniqueness once, including nodes beyond the visible layer limit.
-  // A document-wide selector query for every layer becomes quadratic.
+export function indexDesignSelectors(doc: Document) {
+  // Count identities once, including nodes beyond the displayed layer limit.
   const identities = new Map<string, Map<string, number>>([
     [NODE_ID, new Map()],
     ['id', new Map()],
@@ -100,59 +84,7 @@ export function readLayers(doc: Document): { layers: DesignLayer[]; truncated: b
       }
     }
   }
-  function visit(
-    el: Element,
-    depth: number,
-    parent: string | null,
-    inheritedLock: boolean,
-    path: string,
-  ): DesignLayer | null {
-    if (OMIT.has(el.tagName.toUpperCase())) return null
-    if (count >= 3000 || depth > 80) {
-      truncated = true
-      return null
-    }
-    count++
-    const selector =
-      anchoredSelector(el, (attribute, value) => identities.get(attribute)?.get(identityKey(attribute, value)) === 1) ??
-      path
-    const ownLocked = el.hasAttribute('data-doop-locked')
-    const locked = inheritedLock || ownLocked
-    const style = (el as HTMLElement).style
-    const children: DesignLayer[] = []
-    const positions = new Map<string, number>()
-    for (const child of el.children) {
-      const nth = (positions.get(child.tagName) ?? 0) + 1
-      positions.set(child.tagName, nth)
-      const layer = visit(
-        child,
-        depth + 1,
-        selector,
-        locked,
-        `${path} > ${child.tagName.toLowerCase()}:nth-of-type(${nth})`,
-      )
-      if (layer) children.push(layer)
-    }
-    return {
-      selector,
-      parent,
-      name: layerName(el),
-      tag: el.tagName.toLowerCase(),
-      depth,
-      hidden: el.hasAttribute('hidden') || style?.display === 'none' || style?.visibility === 'hidden',
-      locked,
-      ownLocked,
-      text: el.children.length === 0 ? el.textContent || '' : '',
-      image: el.tagName === 'IMG' ? el.getAttribute('src') || undefined : undefined,
-      children,
-    }
-  }
-  const root = visit(doc.body, 0, null, false, 'body:nth-of-type(1)')
-  return { layers: root ? [root] : [], truncated }
-}
-
-export function flattenLayers(layers: DesignLayer[]): DesignLayer[] {
-  return layers.flatMap((layer) => [layer, ...flattenLayers(layer.children)])
+  return (attribute: string, value: string) => identities.get(attribute)?.get(identityKey(attribute, value)) === 1
 }
 
 export type DesignEdit =
